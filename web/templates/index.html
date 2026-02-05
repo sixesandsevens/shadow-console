@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block content %}
+<meta http-equiv="refresh" content="10;url=/?since={{ latest_event_id }}">
+
+{% if stale_level == "dead" %}
+<div class="alert alert-danger sticky-top mb-3" role="alert">
+  <strong>DATA STALE:</strong> poller hasn’t updated in {{ snapshot_age_sec }}s.
+  Check shadow_poller.py or API connectivity.
+</div>
+{% elif stale_level == "stale" %}
+<div class="alert alert-warning sticky-top mb-3" role="alert">
+  <strong>Data is getting stale:</strong> last update {{ snapshot_age_sec }}s ago.
+</div>
+{% endif %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h1 class="h3 mb-1">Dashboard</h1>
+    {% if latest_ts %}
+      <div class="text-muted">
+        Latest snapshot: <code>{{ latest_ts }}</code> ({{ latest_ts|age }} ago)
+        <span class="heartbeat {{ stale_level }}" title="{{ stale_label }}"></span>
+        {% if stale_level == "live" %}
+          <span class="badge bg-success ms-2">{{ stale_label }}</span>
+        {% elif stale_level == "stale" %}
+          <span class="badge bg-warning text-dark ms-2">{{ stale_label }}</span>
+        {% elif stale_level == "dead" %}
+          <span class="badge bg-danger ms-2">{{ stale_label }}</span>
+        {% else %}
+          <span class="badge bg-secondary ms-2">{{ stale_label }}</span>
+        {% endif %}
+        {% if snapshot_age_sec is not none %}
+          <span class="text-muted ms-2">age: {{ snapshot_age_sec }}s</span>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="text-muted">No snapshots yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Clients</div>
+        <div class="display-6">{{ client_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Devices</div>
+        <div class="display-6">{{ device_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted mb-2">Events (last hour)</div>
+        <div class="d-flex flex-wrap gap-2">
+          {% for r in breakdown %}
+            <span class="badge bg-secondary">{{ r["event_type"] }}: {{ r["c"] }}</span>
+          {% endfor %}
+          {% if breakdown|length == 0 %}
+            <span class="text-muted">No events in last hour.</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if anomalies %}
+<div class="incident-panel">
+  <div class="incident-header">
+    {{ anomalies|length }} active incident{{ 's' if anomalies|length > 1 else '' }}
+  </div>
+  {% for a in anomalies %}
+    <div class="incident incident-{{ a.level }}">
+      <span>⚠ {{ a.text }}</span>
+      {% if a.age %}
+        <span class="incident-age">{{ a.age }} ago</span>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="ticker-wrap ticker-{{ stale_level }}">
+  <div class="ticker">
+    <div class="ticker__item">
+      {% for e in events %}
+        <span class="ticker-pill ticker-{{ e['event_type']|lower }} {% if e['rowid'] > since %}new{% endif %}">
+          <strong>{{ e['event_type'] }}</strong>
+          · {{ e['mac'] }}
+          {% if e['ip_new'] %} · {{ e['ip_new'] }}{% endif %}
+          {% if e['uplink_new'] %} · {{ e['uplink_new'] }}{% endif %}
+        </span>
+      {% endfor %}
+      {% for e in events %}
+        <span class="ticker-pill ticker-{{ e['event_type']|lower }} {% if e['rowid'] > since %}new{% endif %}">
+          <strong>{{ e['event_type'] }}</strong>
+          · {{ e['mac'] }}
+          {% if e['ip_new'] %} · {{ e['ip_new'] }}{% endif %}
+          {% if e['uplink_new'] %} · {{ e['uplink_new'] }}{% endif %}
+        </span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% set new_count = 0 %}
+{% for e in events %}
+  {% if e['rowid'] > since %}
+    {% set new_count = new_count + 1 %}
+  {% endif %}
+{% endfor %}
+
+<div class="mb-2">
+  {% if new_count > 0 %}
+    <span class="badge bg-warning text-dark">New since last refresh: {{ new_count }}</span>
+  {% else %}
+    <span class="badge bg-secondary">No new events</span>
+  {% endif %}
+  <span class="text-muted ms-2">Auto-refresh: 10s</span>
+</div>
+
+<h2 class="h5">Recent actionable events</h2>
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Type</th>
+          <th>MAC</th>
+          <th>IP</th>
+          <th>Uplink</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr class="{% if e['rowid'] > since %}table-warning{% endif %}">
+          <td><code>{{ e["ts"] }}</code><div class="small text-muted">{{ e["ts"]|age }} ago</div></td>
+          <td><span class="badge bg-dark">{{ e["event_type"] }}</span></td>
+          <td><code>{{ e["mac"] }}</code></td>
+          <td>
+            {% if e["ip_old"] %}<span class="text-muted">{{ e["ip_old"] }}</span> → {% endif %}
+            {% if e["ip_new"] %}<span>{{ e["ip_new"] }}</span>{% endif %}
+          </td>
+          <td>
+            {% if e["uplink_old"] %}<span class="text-muted">{{ e["uplink_old"] }}</span> → {% endif %}
+            {% if e["uplink_new"] %}<span>{{ e["uplink_new"] }}</span>{% endif %}
+          </td>
+          <td class="text-muted">{{ e["details"] }}</td>
+        </tr>
+        {% endfor %}
+        {% if events|length == 0 %}
+        <tr><td colspan="6" class="text-muted p-3">No events yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

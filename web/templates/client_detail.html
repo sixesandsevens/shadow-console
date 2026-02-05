@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4">Client</h1>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div><strong>Name:</strong> {{ state["last_name"] }}</div>
+    <div><strong>MAC:</strong> <code>{{ state["last_mac"] }}</code></div>
+    <div><strong>Type:</strong> <span class="badge bg-secondary">{{ state["last_type"] }}</span></div>
+    <div><strong>Last IP:</strong> <code>{{ state["last_ip"] }}</code></div>
+    <div><strong>Last seen:</strong> <code>{{ state["last_seen_ts"] }}</code> ({{ state["last_seen_ts"]|age }} ago)</div>
+    <div><strong>Miss count:</strong> {{ state["miss_count"] }}</div>
+  </div>
+</div>
+
+<h2 class="h6">Recent events</h2>
+<div class="card mb-4">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr>
+          <th>When</th><th>Type</th><th>IP</th><th>Uplink</th><th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr>
+          <td><code>{{ e["ts"] }}</code><div class="small text-muted">{{ e["ts"]|age }} ago</div></td>
+          <td><span class="badge bg-dark">{{ e["event_type"] }}</span></td>
+          <td>
+            {% if e["ip_old"] %}<span class="text-muted">{{ e["ip_old"] }}</span> → {% endif %}
+            {% if e["ip_new"] %}<span>{{ e["ip_new"] }}</span>{% endif %}
+          </td>
+          <td>
+            {% if e["uplink_old"] %}<span class="text-muted">{{ e["uplink_old"] }}</span> → {% endif %}
+            {% if e["uplink_new"] %}<span>{{ e["uplink_new"] }}</span>{% endif %}
+          </td>
+          <td class="text-muted">{{ e["details"] }}</td>
+        </tr>
+        {% endfor %}
+        {% if events|length == 0 %}
+        <tr><td colspan="5" class="text-muted p-3">No events for this client.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h2 class="h6">Snapshot history</h2>
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr><th>When</th><th>Type</th><th>Name</th><th>IP</th><th>Uplink</th></tr>
+      </thead>
+      <tbody>
+        {% for h in history %}
+        <tr>
+          <td><code>{{ h["ts"] }}</code><div class="small text-muted">{{ h["ts"]|age }} ago</div></td>
+          <td><span class="badge bg-secondary">{{ h["type"] }}</span></td>
+          <td>{{ h["name"] }}</td>
+          <td><code>{{ h["ip"] }}</code></td>
+          <td class="text-muted">{{ h["uplink_device_name"] }}</td>
+        </tr>
+        {% endfor %}
+        {% if history|length == 0 %}
+        <tr><td colspan="5" class="text-muted p-3">No history.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

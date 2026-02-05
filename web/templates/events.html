@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4">Events</h1>
+
+<form class="row g-2 align-items-end mb-3" method="get">
+  <div class="col-md-3">
+    <label class="form-label">Type</label>
+    <select class="form-select" name="type">
+      <option value="">(all)</option>
+      {% for t in types %}
+        <option value="{{ t['event_type'] }}" {% if selected_type==t['event_type'] %}selected{% endif %}>
+          {{ t['event_type'] }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Limit</label>
+    <input class="form-control" type="number" name="limit" value="{{ limit }}" min="1" max="2000">
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-primary w-100">Apply</button>
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Type</th>
+          <th>MAC</th>
+          <th>Client</th>
+          <th>IP</th>
+          <th>Uplink</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr>
+          <td><code>{{ e["ts"] }}</code><div class="small text-muted">{{ e["ts"]|age }} ago</div></td>
+          <td><span class="badge bg-dark">{{ e["event_type"] }}</span></td>
+          <td><code>{{ e["mac"] }}</code></td>
+          <td>
+            {% if e["client_id"] %}
+              <a href="/clients/{{ e['client_id'] }}"><code>{{ e["client_id"][:8] }}…</code></a>
+            {% endif %}
+          </td>
+          <td>
+            {% if e["ip_old"] %}<span class="text-muted">{{ e["ip_old"] }}</span> → {% endif %}
+            {% if e["ip_new"] %}<span>{{ e["ip_new"] }}</span>{% endif %}
+          </td>
+          <td>
+            {% if e["uplink_old"] %}<span class="text-muted">{{ e["uplink_old"] }}</span> → {% endif %}
+            {% if e["uplink_new"] %}<span>{{ e["uplink_new"] }}</span>{% endif %}
+          </td>
+          <td class="text-muted">{{ e["details"] }}</td>
+        </tr>
+        {% endfor %}
+        {% if events|length == 0 %}
+        <tr><td colspan="7" class="text-muted p-3">No events.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

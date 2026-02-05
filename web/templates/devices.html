@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4">Devices</h1>
+
+{% if ts %}
+<div class="text-muted mb-2">Snapshot: <code>{{ ts }}</code> ({{ ts|age }} ago)</div>
+{% endif %}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr>
+          <th>State</th><th>Name</th><th>Model</th><th>IP</th><th>MAC</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in devices %}
+        <tr>
+          <td>
+            {% if d["state"] == "OFFLINE" %}
+              <span class="badge bg-danger">OFFLINE</span>
+            {% else %}
+              <span class="badge bg-success">ONLINE</span>
+            {% endif %}
+          </td>
+          <td>{{ d["name"] }}</td>
+          <td class="text-muted">{{ d["model"] }}</td>
+          <td><code>{{ d["ip"] }}</code></td>
+          <td><code>{{ d["mac"] }}</code></td>
+        </tr>
+        {% endfor %}
+        {% if devices|length == 0 %}
+        <tr><td colspan="5" class="text-muted p-3">No devices.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

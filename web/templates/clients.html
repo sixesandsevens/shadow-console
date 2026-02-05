@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4">Clients</h1>
+
+{% if ts %}
+<div class="text-muted mb-2">Snapshot: <code>{{ ts }}</code> ({{ ts|age }} ago)</div>
+{% endif %}
+
+<form class="row g-2 align-items-end mb-3" method="get">
+  <div class="col-md-2">
+    <label class="form-label">Type</label>
+    <select class="form-select" name="type">
+      <option value="">(all)</option>
+      <option value="WIRED" {% if ctype=="WIRED" %}selected{% endif %}>WIRED</option>
+      <option value="WIRELESS" {% if ctype=="WIRELESS" %}selected{% endif %}>WIRELESS</option>
+    </select>
+  </div>
+  <div class="col-md-6">
+    <label class="form-label">Search</label>
+    <input class="form-control" name="q" value="{{ search }}" placeholder="name / mac / ip">
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-primary w-100">Apply</button>
+  </div>
+</form>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Name</th>
+          <th>MAC</th>
+          <th>IP</th>
+          <th>Uplink</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in clients %}
+        <tr>
+          <td><span class="badge bg-secondary">{{ c["type"] }}</span></td>
+          <td>
+            <a href="/clients/{{ c['client_id'] }}">{{ c["name"] }}</a>
+          </td>
+          <td><code>{{ c["mac"] }}</code></td>
+          <td><code>{{ c["ip"] }}</code></td>
+          <td class="text-muted">{{ c["uplink_device_name"] }}</td>
+        </tr>
+        {% endfor %}
+        {% if clients|length == 0 %}
+        <tr><td colspan="5" class="text-muted p-3">No clients found.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
