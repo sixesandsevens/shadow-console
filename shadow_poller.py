@@ -3,7 +3,7 @@ import os
 import time
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -13,6 +13,14 @@ DEVICE_MISSING_GRACE_POLLS = 2
 LEFT_CLIENT_STALE_SEC = 3600
 ROAM_FLAP_WINDOW_SEC = 10 * 60
 ROAM_FLAP_THRESHOLD = 5
+
+# device_snapshot/client_snapshot are written on every poll regardless of
+# change and are only ever read as "latest" or "last 200 rows per client"
+# (~3h at a 60s poll interval) -- so they only need a short rolling window.
+# events is the real change-log (roam/connect/disconnect) and is kept longer.
+SNAPSHOT_RETENTION_HOURS = int(os.getenv("SHADOW_SNAPSHOT_RETENTION_HOURS", "24"))
+EVENTS_RETENTION_DAYS = int(os.getenv("SHADOW_EVENTS_RETENTION_DAYS", "90"))
+PRUNE_INTERVAL_SEC = int(os.getenv("SHADOW_PRUNE_INTERVAL_SEC", "3600"))
 
 
 def utc_now_iso() -> str:
@@ -68,6 +76,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    # Lets `PRAGMA incremental_vacuum` reclaim freed pages during pruning
+    # without a full-database VACUUM/exclusive lock. Only takes effect on a
+    # fresh db or after the one-time VACUUM that converts an existing db.
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
 
     conn.execute(
         """
@@ -192,6 +204,25 @@ def get_last_two_device_timestamps(conn: sqlite3.Connection) -> Tuple[Optional[s
     return rows[0][0], rows[1][0]
 
 
+def prune_old_data(conn: sqlite3.Connection) -> None:
+    snapshot_cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=SNAPSHOT_RETENTION_HOURS)
+    ).replace(microsecond=0).isoformat()
+    events_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=EVENTS_RETENTION_DAYS)
+    ).replace(microsecond=0).isoformat()
+
+    conn.execute("BEGIN;")
+    conn.execute("DELETE FROM device_snapshot WHERE ts < ?;", (snapshot_cutoff,))
+    conn.execute("DELETE FROM client_snapshot WHERE ts < ?;", (snapshot_cutoff,))
+    conn.execute("DELETE FROM events WHERE ts < ?;", (events_cutoff,))
+    conn.commit()
+
+    # Reclaims freed pages incrementally (cheap, no exclusive lock) instead
+    # of letting the file grow forever between full VACUUMs.
+    conn.execute("PRAGMA incremental_vacuum;")
+
+
 def main() -> None:
     # Read config
     base_url = get_env("SHADOW_UDM_URL")          # e.g. https://192.168.1.1
@@ -206,6 +237,9 @@ def main() -> None:
     requests.packages.urllib3.disable_warnings()  # type: ignore
 
     conn = init_db(db_path)
+
+    prune_old_data(conn)
+    last_prune = time.monotonic()
 
     while True:
         ts = utc_now_iso()
@@ -651,6 +685,13 @@ def main() -> None:
         except Exception as e:
             # don't die; log and continue
             print(f"[{ts}] ERROR: {type(e).__name__}: {e}")
+
+        if time.monotonic() - last_prune >= PRUNE_INTERVAL_SEC:
+            try:
+                prune_old_data(conn)
+            except Exception as e:
+                print(f"[{ts}] PRUNE ERROR: {type(e).__name__}: {e}")
+            last_prune = time.monotonic()
 
         time.sleep(interval)
 

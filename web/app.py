@@ -8,7 +8,7 @@ import re
 from flask import Flask, g, render_template, request, abort
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB = os.path.abspath(os.path.join(APP_DIR, "..", "shadowconsole.db"))
+DEFAULT_DB = os.getenv("SHADOW_DB") or os.path.abspath(os.path.join(APP_DIR, "..", "shadowconsole.db"))
 
 
 def create_app() -> Flask:
