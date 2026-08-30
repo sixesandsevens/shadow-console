@@ -10,25 +10,19 @@ from flask import Flask, g, render_template, request, abort, redirect, url_for
 
 try:
     import notify_policy
+    import device_lifecycle
 except ImportError:
     # Direct-run mode (`python3 web/app.py`) without PYTHONPATH set won't
-    # see notify_policy.py in the parent dir otherwise -- the systemd unit
-    # always sets PYTHONPATH=/opt/shadow-console, so this only matters for
-    # ad-hoc manual runs.
+    # see notify_policy.py/device_lifecycle.py in the parent dir otherwise --
+    # the systemd unit always sets PYTHONPATH=/opt/shadow-console, so this
+    # only matters for ad-hoc manual runs.
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import notify_policy
+    import device_lifecycle
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.getenv("SHADOW_DB") or os.path.abspath(os.path.join(APP_DIR, "..", "shadowconsole.db"))
-
-LIFECYCLES = ("monitored", "maintenance", "ignored", "retired")
-# Devices in these states keep their full historical events/incidents, but
-# are excluded from stats aggregation (uptime %, most-troublesome, total
-# downtime) and from the dashboard's active-incident/notification panel --
-# see the /settings device discussion: "device state" (online/offline) and
-# "device intent" (should we even care right now) are different axes.
-EXCLUDED_LIFECYCLES = ("maintenance", "ignored", "retired")
 
 
 def create_app() -> Flask:
@@ -41,18 +35,8 @@ def create_app() -> Flask:
             conn.row_factory = sqlite3.Row
             # Written from this web app (Devices page), not the poller, so
             # ensure it exists here too rather than depending on the poller
-            # having been restarted since this table was added.
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS device_overrides (
-                    device_id TEXT PRIMARY KEY,
-                    lifecycle TEXT NOT NULL DEFAULT 'monitored',
-                    note TEXT,
-                    updated_at TEXT
-                );
-                """
-            )
-            conn.commit()
+            # having been restarted since device_overrides was added.
+            device_lifecycle.ensure_schema(conn)
             g.db = conn
         return g.db
 
@@ -103,23 +87,11 @@ def create_app() -> Flask:
             return f"{m}m {s}s"
         return f"{s}s"
 
-    def device_lifecycles() -> Dict[str, str]:
-        return {r["device_id"]: r["lifecycle"] for r in q("SELECT device_id, lifecycle FROM device_overrides;")}
-
-    def excluded_device_ids() -> set:
-        return {
-            r["device_id"]
-            for r in q(
-                f"SELECT device_id FROM device_overrides WHERE lifecycle IN ({','.join('?' * len(EXCLUDED_LIFECYCLES))});",
-                EXCLUDED_LIFECYCLES,
-            )
-        }
-
     def excluded_macs() -> set:
         # events/device_incidents identify a device by mac, not device_id,
         # so alerting/notification filtering has to go through device_state
         # (the only table that keeps a current device_id -> mac mapping).
-        ids = excluded_device_ids()
+        ids = device_lifecycle.excluded_device_ids(get_db())
         if not ids:
             return set()
         rows = q(
@@ -127,6 +99,23 @@ def create_app() -> Flask:
             tuple(ids),
         )
         return {r["last_mac"] for r in rows if r["last_mac"]}
+
+    def human_until(ts: Optional[str]) -> str:
+        """Inverse of human_age: relative time remaining until a future ts."""
+        if not ts:
+            return "indefinitely"
+        delta = parse_ts(ts) - datetime.now(timezone.utc)
+        s = int(delta.total_seconds())
+        if s <= 0:
+            return "expired"
+        m = s // 60
+        if m < 60:
+            return f"in {m}m"
+        h = m // 60
+        if h < 48:
+            return f"in {h}h"
+        d = h // 24
+        return f"in {d}d"
 
     def extract_building(name: Optional[str]) -> Optional[str]:
         # No structured building field exists anywhere in the UniFi API --
@@ -151,6 +140,7 @@ def create_app() -> Flask:
         return window, start, now
 
     app.jinja_env.filters["age"] = human_age
+    app.jinja_env.filters["until"] = human_until
 
     @app.route("/")
     def index():
@@ -284,7 +274,7 @@ def create_app() -> Flask:
         # or DEVICE_MISSING, closed the moment it comes back (DEVICE_ONLINE).
         # Unlike a fixed time window, this disappears exactly when the
         # device recovers instead of lingering for N more minutes.
-        excluded_ids = excluded_device_ids()
+        excluded_ids = device_lifecycle.excluded_device_ids(get_db())
         active_incidents = [
             inc
             for inc in q(
@@ -544,7 +534,11 @@ def create_app() -> Flask:
     def devices():
         latest = q1("SELECT ts FROM device_snapshot ORDER BY ts DESC LIMIT 1;")
         if not latest:
-            return render_template("devices.html", ts=None, devices=[], lifecycles=LIFECYCLES)
+            return render_template(
+                "devices.html", ts=None, devices=[],
+                lifecycles=device_lifecycle.LIFECYCLES,
+                maintenance_durations=device_lifecycle.MAINTENANCE_DURATIONS,
+            )
 
         ts = latest["ts"]
         rows = q(
@@ -558,25 +552,33 @@ def create_app() -> Flask:
             """,
             (ts,),
         )
-        overrides = device_lifecycles()
-        devices_out = [dict(r, lifecycle=overrides.get(r["device_id"], "monitored")) for r in rows]
-        return render_template("devices.html", ts=ts, devices=devices_out, lifecycles=LIFECYCLES)
+        overrides = device_lifecycle.all_overrides(get_db())
+        devices_out = [
+            dict(
+                r,
+                lifecycle=overrides.get(r["device_id"], {}).get("lifecycle", "monitored"),
+                maintenance_until=overrides.get(r["device_id"], {}).get("maintenance_until"),
+            )
+            for r in rows
+        ]
+        return render_template(
+            "devices.html", ts=ts, devices=devices_out,
+            lifecycles=device_lifecycle.LIFECYCLES,
+            maintenance_durations=device_lifecycle.MAINTENANCE_DURATIONS,
+        )
 
     @app.route("/devices/<device_id>/lifecycle", methods=["POST"])
     def set_device_lifecycle(device_id: str):
         lifecycle = request.form.get("lifecycle", "monitored")
-        if lifecycle not in LIFECYCLES:
+        maintenance_duration = request.form.get("maintenance_duration", "indefinite")
+        if lifecycle not in device_lifecycle.LIFECYCLES:
             abort(400)
-        db = get_db()
-        db.execute(
-            """
-            INSERT INTO device_overrides (device_id, lifecycle, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET lifecycle=excluded.lifecycle, updated_at=excluded.updated_at;
-            """,
-            (device_id, lifecycle, datetime.now(timezone.utc).isoformat(timespec="seconds")),
-        )
-        db.commit()
+        if maintenance_duration not in device_lifecycle.MAINTENANCE_DURATIONS:
+            abort(400)
+        try:
+            device_lifecycle.set_device_lifecycle(get_db(), device_id, lifecycle, maintenance_duration)
+        except ValueError:
+            abort(400)
         return redirect(url_for("devices"))
 
     @app.route("/settings")
@@ -593,7 +595,7 @@ def create_app() -> Flask:
         # rollup. Only client_snapshot-derived numbers (client trend,
         # poller uptime) need daily_network_stats, since that source table
         # is pruned after 24h.
-        excluded_ids = excluded_device_ids()
+        excluded_ids = device_lifecycle.excluded_device_ids(get_db())
         incident_rows = [
             r
             for r in q(

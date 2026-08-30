@@ -8,7 +8,8 @@
 
 <p class="text-muted small">
   Lifecycle controls whether a device counts toward stats (uptime %, most-troublesome,
-  total downtime) and active-incident alerting. Historical events are always kept regardless.
+  total downtime) and active-incident alerting (dashboard, browser, Slack). Historical
+  events and incidents are always kept regardless of lifecycle.
 </p>
 
 <div class="card">
@@ -21,7 +22,7 @@
       </thead>
       <tbody>
         {% for d in devices %}
-        <tr class="{% if d['lifecycle'] != 'monitored' %}text-muted{% endif %}">
+        <tr>
           <td>
             {% if d["state"] == "OFFLINE" %}
               <span class="badge bg-danger">OFFLINE</span>
@@ -34,13 +35,24 @@
           <td><code>{{ d["ip"] }}</code></td>
           <td><code>{{ d["mac"] }}</code></td>
           <td>
-            <form method="post" action="{{ url_for('set_device_lifecycle', device_id=d['device_id']) }}" class="d-flex align-items-center gap-2">
-              <select name="lifecycle" class="form-select form-select-sm" style="width: auto;" onchange="this.form.requestSubmit()">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="badge lifecycle-badge lifecycle-{{ d['lifecycle'] }}">{{ d['lifecycle']|upper }}</span>
+              {% if d['lifecycle'] == 'maintenance' %}
+                <span class="text-muted small">{{ d['maintenance_until']|until if d['maintenance_until'] else 'indefinitely' }}</span>
+              {% endif %}
+            </div>
+            <form method="post" action="{{ url_for('set_device_lifecycle', device_id=d['device_id']) }}" class="d-flex align-items-center gap-2 mt-1 lifecycle-form">
+              <select name="lifecycle" class="form-select form-select-sm lifecycle-select" style="width: auto;">
                 {% for lc in lifecycles %}
                 <option value="{{ lc }}" {% if d['lifecycle'] == lc %}selected{% endif %}>{{ lc|capitalize }}</option>
                 {% endfor %}
               </select>
-              <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Set</button></noscript>
+              <select name="maintenance_duration" class="form-select form-select-sm maintenance-duration" style="width: auto; {% if d['lifecycle'] != 'maintenance' %}display:none;{% endif %}">
+                {% for dur in maintenance_durations %}
+                <option value="{{ dur }}">{{ {"30m": "30 minutes", "1h": "1 hour", "4h": "4 hours", "tomorrow": "Until tomorrow", "indefinite": "Indefinite"}[dur] }}</option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="btn btn-sm btn-outline-secondary">Set</button>
             </form>
           </td>
         </tr>
@@ -52,4 +64,16 @@
     </table>
   </div>
 </div>
+
+<script>
+(function () {
+  document.querySelectorAll(".lifecycle-form").forEach(function (form) {
+    var select = form.querySelector(".lifecycle-select");
+    var durationSelect = form.querySelector(".maintenance-duration");
+    select.addEventListener("change", function () {
+      durationSelect.style.display = select.value === "maintenance" ? "" : "none";
+    });
+  });
+})();
+</script>
 {% endblock %}

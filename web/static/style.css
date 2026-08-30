@@ -245,6 +245,41 @@ code { font-size: 0.9em; }
 .theme-swatch.selected {
   border-color: var(--sc-accent);
 }
+
+/* Device lifecycle badges -- deliberately restrained (see /devices): these
+   describe operator intent, not live incident severity, so none of them
+   should read as louder than the OFFLINE/ONLINE badge next to them. */
+.lifecycle-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.lifecycle-monitored {
+  background: transparent;
+  border: 1px solid var(--sc-border);
+  color: var(--sc-muted);
+}
+
+.lifecycle-maintenance {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+}
+
+.lifecycle-ignored {
+  background: transparent;
+  border: 1px solid var(--sc-border);
+  color: var(--sc-muted);
+  opacity: 0.8;
+}
+
+.lifecycle-retired {
+  background: transparent;
+  border: 1px dashed var(--sc-border);
+  color: var(--sc-muted);
+  opacity: 0.6;
+}
 /* Bootstrap's .table-warning hardcodes a literal cream bg + black text with
    no dark-mode variant (unlike most Bootstrap components, it never reads
    --bs-warning-* at all) -- so it stays cream-on-black regardless of theme

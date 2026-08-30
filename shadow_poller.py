@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import device_lifecycle
 import notify_policy
 import slack_dispatcher
 
@@ -277,19 +278,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
     # written by the poller itself. A device with no row here is implicitly
     # "monitored". "ignored"/"retired"/"maintenance" devices keep their full
     # incident/event history but are excluded from stats aggregation and
-    # alerting -- see web/app.py's EXCLUDED_LIFECYCLES -- so a switch that's
-    # been unplugged for months (known case: a Pavilion AP) stops dragging
-    # down uptime %, "most troublesome," and active-incident notifications.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS device_overrides (
-            device_id TEXT PRIMARY KEY,
-            lifecycle TEXT NOT NULL DEFAULT 'monitored',
-            note TEXT,
-            updated_at TEXT
-        );
-        """
-    )
+    # alerting -- see device_lifecycle.py -- so a switch that's been
+    # unplugged for months (known case: a Pavilion AP) stops dragging down
+    # uptime %, "most troublesome," and active-incident notifications.
+    device_lifecycle.ensure_schema(conn)
 
     # CREATE TABLE IF NOT EXISTS above only helps a fresh database -- an
     # existing one (like the live deployment) already has these tables
@@ -645,7 +637,7 @@ def main() -> None:
                                 ),
                             )
                             decision = notify_policy.classify("DEVICE_OFFLINE", d["device_type"])
-                            if decision["notify"]:
+                            if decision["notify"] and device_lifecycle.is_alertable(conn, did):
                                 slack_dispatcher.notify_device_event("critical", d["name"], d["device_type"])
                         elif cur_state == "ONLINE":
                             # Grab the still-open incident's opened_ts for
@@ -667,7 +659,7 @@ def main() -> None:
                             )
                             online_emitted.add(did)
                             decision = notify_policy.classify("DEVICE_ONLINE", d["device_type"])
-                            if decision["notify"]:
+                            if decision["notify"] and device_lifecycle.is_alertable(conn, did):
                                 downtime = None
                                 if prior_incident is not None:
                                     try:
@@ -712,7 +704,7 @@ def main() -> None:
                             )
                             online_emitted.add(did)
                             decision = notify_policy.classify("DEVICE_ONLINE", d["device_type"])
-                            if decision["notify"]:
+                            if decision["notify"] and device_lifecycle.is_alertable(conn, did):
                                 downtime = None
                                 try:
                                     opened_dt = datetime.fromisoformat(active[1])
@@ -748,7 +740,7 @@ def main() -> None:
                             ),
                         )
                         decision = notify_policy.classify("DEVICE_MISSING", last_device_type)
-                        if decision["notify"]:
+                        if decision["notify"] and device_lifecycle.is_alertable(conn, did):
                             slack_dispatcher.notify_device_event("critical", last_name, last_device_type)
 
                     if new_miss >= DEVICE_MISSING_GRACE_POLLS:
