@@ -263,13 +263,32 @@ def create_app() -> Flask:
 
         new_count = sum(1 for e in events if e["rowid"] > since)
 
-        # Browser-notification payload: only the notify_policy-approved
-        # subset of `events` (already fetched above, same curated list the
-        # ticker renders) -- embedded as JSON for notify.js to read. This
-        # rides the page's existing 10s auto-refresh instead of a second
-        # polling loop; see notify_policy.py for the actual policy.
+        # Browser-notification payload: queried SEPARATELY from `events`
+        # above (the ticker's curated, LIMIT-50 list) -- a single switch
+        # outage can spawn dozens of LEFT_CLIENT rows right behind it,
+        # which would push the actual DEVICE_OFFLINE past position 50
+        # before the next page refresh and silently bury the one event
+        # that must never be missed. This query only ever looks at the
+        # narrow slice notify_policy actually cares about, so a large
+        # client-churn burst can't crowd it out. Still embedded as JSON
+        # for notify.js to read, still riding the page's existing 10s
+        # auto-refresh -- no second polling loop.
+        notify_event_types = tuple(notify_policy.FAILURE_EVENT_TYPES | notify_policy.RECOVERY_EVENT_TYPES)
+        notify_device_types = tuple(notify_policy.NOTIFY_DEVICE_TYPES)
+        notify_source = q(
+            f"""
+            SELECT rowid, ts, event_type, mac, device_type, details
+            FROM events
+            WHERE event_type IN ({",".join("?" * len(notify_event_types))})
+              AND device_type IN ({",".join("?" * len(notify_device_types))})
+            ORDER BY rowid DESC
+            LIMIT 500;
+            """,
+            notify_event_types + notify_device_types,
+        )
+
         notify_events = []
-        for e in events:
+        for e in notify_source:
             decision = notify_policy.classify(e["event_type"], e["device_type"])
             if not decision["notify"]:
                 continue
