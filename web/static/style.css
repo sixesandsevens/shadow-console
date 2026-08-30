@@ -56,7 +56,7 @@ body {
   --sc-text: #ffb000;
   --sc-card: #241600;
   --sc-border: rgba(255,176,0,0.2);
-  --sc-muted: #aa7700;
+  --sc-muted: #c08a00;
   --sc-table-bg: #241600;
   --sc-table-row: #241600;
   --sc-table-row-alt: #2e1c00;
@@ -70,7 +70,7 @@ body {
   --sc-text: #cbd5e1;
   --sc-card: #0a1128;
   --sc-border: rgba(147,197,253,0.14);
-  --sc-muted: #64748b;
+  --sc-muted: #8592a8;
   --sc-table-bg: #0a1128;
   --sc-table-row: #0a1128;
   --sc-table-row-alt: #0e1730;
@@ -93,11 +93,29 @@ body {
   color-scheme: dark;
 }
 
-:root[data-theme="terminal"],
-:root[data-theme="amber"],
-:root[data-theme="midnight"],
-:root[data-theme="contrast"] {
+/* Bootstrap components (.form-control, .card-body, .text-muted, links, ...)
+   read their own --bs-* variables directly rather than inheriting `color`
+   from an ancestor -- see the .table fix below for the same phenomenon.
+   Flipping data-bs-theme="dark" (set alongside data-theme by the JS in
+   base.html/settings.html) pulls in Bootstrap's own dark-mode variable
+   set as a sane base, and this block re-points the color-bearing ones at
+   our theme's palette so components pick up Shadow/Terminal/Amber/etc.
+   instead of Bootstrap's stock slate-gray dark theme. */
+:root:is([data-theme="dark"], [data-theme="terminal"], [data-theme="amber"], [data-theme="midnight"], [data-theme="contrast"]) {
   --bs-body-bg: var(--sc-bg);
+  --bs-body-color: var(--sc-text);
+  --bs-emphasis-color: var(--sc-text);
+  --bs-heading-color: var(--sc-text);
+  --bs-secondary-color: var(--sc-muted);
+  --bs-tertiary-color: var(--sc-muted);
+  --bs-border-color: var(--sc-border);
+  --bs-border-color-translucent: var(--sc-border);
+  --bs-link-color: var(--sc-accent);
+  --bs-link-hover-color: var(--sc-accent);
+  --bs-card-bg: var(--sc-card);
+  --bs-card-color: var(--sc-text);
+  --bs-secondary-bg: var(--sc-card);
+  --bs-tertiary-bg: var(--sc-card);
 }
 
 .card {

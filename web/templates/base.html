@@ -12,6 +12,7 @@
       var root = document.documentElement;
       var theme = localStorage.getItem("shadow-theme");
       if (theme) root.setAttribute("data-theme", theme);
+      root.setAttribute("data-bs-theme", (theme || "light") === "light" ? "light" : "dark");
       var accent = localStorage.getItem("shadow-accent");
       if (accent) root.style.setProperty("--sc-accent", accent);
       if (localStorage.getItem("shadow-crt") === "on") root.classList.add("crt-on");

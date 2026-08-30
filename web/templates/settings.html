@@ -96,6 +96,7 @@
     btn.addEventListener("click", function () {
       var theme = btn.dataset.theme;
       root.setAttribute("data-theme", theme);
+      root.setAttribute("data-bs-theme", theme === "light" ? "light" : "dark");
       localStorage.setItem("shadow-theme", theme);
       if (!localStorage.getItem("shadow-accent")) {
         accentInput.value = THEME_DEFAULT_ACCENT[theme] || "#ec4899";
