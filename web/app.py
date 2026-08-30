@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import re
-from flask import Flask, g, render_template, request, abort
+from flask import Flask, g, render_template, request, abort, redirect, url_for
 
 try:
     import notify_policy
@@ -22,6 +22,14 @@ except ImportError:
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.getenv("SHADOW_DB") or os.path.abspath(os.path.join(APP_DIR, "..", "shadowconsole.db"))
 
+LIFECYCLES = ("monitored", "maintenance", "ignored", "retired")
+# Devices in these states keep their full historical events/incidents, but
+# are excluded from stats aggregation (uptime %, most-troublesome, total
+# downtime) and from the dashboard's active-incident/notification panel --
+# see the /settings device discussion: "device state" (online/offline) and
+# "device intent" (should we even care right now) are different axes.
+EXCLUDED_LIFECYCLES = ("maintenance", "ignored", "retired")
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -31,6 +39,20 @@ def create_app() -> Flask:
         if "db" not in g:
             conn = sqlite3.connect(app.config["DB_PATH"])
             conn.row_factory = sqlite3.Row
+            # Written from this web app (Devices page), not the poller, so
+            # ensure it exists here too rather than depending on the poller
+            # having been restarted since this table was added.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS device_overrides (
+                    device_id TEXT PRIMARY KEY,
+                    lifecycle TEXT NOT NULL DEFAULT 'monitored',
+                    note TEXT,
+                    updated_at TEXT
+                );
+                """
+            )
+            conn.commit()
             g.db = conn
         return g.db
 
@@ -80,6 +102,31 @@ def create_app() -> Flask:
         if m:
             return f"{m}m {s}s"
         return f"{s}s"
+
+    def device_lifecycles() -> Dict[str, str]:
+        return {r["device_id"]: r["lifecycle"] for r in q("SELECT device_id, lifecycle FROM device_overrides;")}
+
+    def excluded_device_ids() -> set:
+        return {
+            r["device_id"]
+            for r in q(
+                f"SELECT device_id FROM device_overrides WHERE lifecycle IN ({','.join('?' * len(EXCLUDED_LIFECYCLES))});",
+                EXCLUDED_LIFECYCLES,
+            )
+        }
+
+    def excluded_macs() -> set:
+        # events/device_incidents identify a device by mac, not device_id,
+        # so alerting/notification filtering has to go through device_state
+        # (the only table that keeps a current device_id -> mac mapping).
+        ids = excluded_device_ids()
+        if not ids:
+            return set()
+        rows = q(
+            f"SELECT last_mac FROM device_state WHERE device_id IN ({','.join('?' * len(ids))});",
+            tuple(ids),
+        )
+        return {r["last_mac"] for r in rows if r["last_mac"]}
 
     def extract_building(name: Optional[str]) -> Optional[str]:
         # No structured building field exists anywhere in the UniFi API --
@@ -237,14 +284,19 @@ def create_app() -> Flask:
         # or DEVICE_MISSING, closed the moment it comes back (DEVICE_ONLINE).
         # Unlike a fixed time window, this disappears exactly when the
         # device recovers instead of lingering for N more minutes.
-        active_incidents = q(
-            """
-            SELECT device_id, mac, name, model, opened_ts, opened_reason
-            FROM device_incidents
-            WHERE closed_ts IS NULL
-            ORDER BY opened_ts ASC;
-            """
-        )
+        excluded_ids = excluded_device_ids()
+        active_incidents = [
+            inc
+            for inc in q(
+                """
+                SELECT device_id, mac, name, model, opened_ts, opened_reason
+                FROM device_incidents
+                WHERE closed_ts IS NULL
+                ORDER BY opened_ts ASC;
+                """
+            )
+            if inc["device_id"] not in excluded_ids
+        ]
         for inc in active_incidents:
             label = inc["mac"] or inc["device_id"]
             if inc["name"]:
@@ -316,8 +368,11 @@ def create_app() -> Flask:
             notify_event_types + notify_device_types,
         )
 
+        muted_macs = excluded_macs()
         notify_events = []
         for e in notify_source:
+            if e["mac"] in muted_macs:
+                continue
             decision = notify_policy.classify(e["event_type"], e["device_type"])
             if not decision["notify"]:
                 continue
@@ -489,7 +544,7 @@ def create_app() -> Flask:
     def devices():
         latest = q1("SELECT ts FROM device_snapshot ORDER BY ts DESC LIMIT 1;")
         if not latest:
-            return render_template("devices.html", ts=None, devices=[])
+            return render_template("devices.html", ts=None, devices=[], lifecycles=LIFECYCLES)
 
         ts = latest["ts"]
         rows = q(
@@ -503,7 +558,26 @@ def create_app() -> Flask:
             """,
             (ts,),
         )
-        return render_template("devices.html", ts=ts, devices=rows)
+        overrides = device_lifecycles()
+        devices_out = [dict(r, lifecycle=overrides.get(r["device_id"], "monitored")) for r in rows]
+        return render_template("devices.html", ts=ts, devices=devices_out, lifecycles=LIFECYCLES)
+
+    @app.route("/devices/<device_id>/lifecycle", methods=["POST"])
+    def set_device_lifecycle(device_id: str):
+        lifecycle = request.form.get("lifecycle", "monitored")
+        if lifecycle not in LIFECYCLES:
+            abort(400)
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO device_overrides (device_id, lifecycle, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET lifecycle=excluded.lifecycle, updated_at=excluded.updated_at;
+            """,
+            (device_id, lifecycle, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+        db.commit()
+        return redirect(url_for("devices"))
 
     @app.route("/settings")
     def settings():
@@ -519,16 +593,21 @@ def create_app() -> Flask:
         # rollup. Only client_snapshot-derived numbers (client trend,
         # poller uptime) need daily_network_stats, since that source table
         # is pruned after 24h.
-        incident_rows = q(
-            """
-            SELECT device_id, mac, name, model, device_type, opened_ts, closed_ts
-            FROM device_incidents
-            WHERE opened_ts <= ?
-              AND (closed_ts IS NULL OR closed_ts >= ?)
-            ORDER BY opened_ts ASC;
-            """,
-            (now.isoformat(), start.isoformat()),
-        )
+        excluded_ids = excluded_device_ids()
+        incident_rows = [
+            r
+            for r in q(
+                """
+                SELECT device_id, mac, name, model, device_type, opened_ts, closed_ts
+                FROM device_incidents
+                WHERE opened_ts <= ?
+                  AND (closed_ts IS NULL OR closed_ts >= ?)
+                ORDER BY opened_ts ASC;
+                """,
+                (now.isoformat(), start.isoformat()),
+            )
+            if r["device_id"] not in excluded_ids
+        ]
 
         device_agg: Dict[str, Dict[str, Any]] = {}
         building_agg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"incidents": 0, "downtime_seconds": 0.0})
@@ -566,10 +645,14 @@ def create_app() -> Flask:
         # being omitted entirely.
         latest_dev_ts = q1("SELECT MAX(ts) AS ts FROM device_snapshot;")
         known_devices = (
-            q(
-                "SELECT device_id, name, device_type FROM device_snapshot WHERE ts=?;",
-                (latest_dev_ts["ts"],),
-            )
+            [
+                d
+                for d in q(
+                    "SELECT device_id, name, device_type FROM device_snapshot WHERE ts=?;",
+                    (latest_dev_ts["ts"],),
+                )
+                if d["device_id"] not in excluded_ids
+            ]
             if latest_dev_ts and latest_dev_ts["ts"]
             else []
         )

@@ -273,6 +273,24 @@ def init_db(db_path: str) -> sqlite3.Connection:
         """
     )
 
+    # Per-device lifecycle override, set from the web UI (Devices page), not
+    # written by the poller itself. A device with no row here is implicitly
+    # "monitored". "ignored"/"retired"/"maintenance" devices keep their full
+    # incident/event history but are excluded from stats aggregation and
+    # alerting -- see web/app.py's EXCLUDED_LIFECYCLES -- so a switch that's
+    # been unplugged for months (known case: a Pavilion AP) stops dragging
+    # down uptime %, "most troublesome," and active-incident notifications.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_overrides (
+            device_id TEXT PRIMARY KEY,
+            lifecycle TEXT NOT NULL DEFAULT 'monitored',
+            note TEXT,
+            updated_at TEXT
+        );
+        """
+    )
+
     # CREATE TABLE IF NOT EXISTS above only helps a fresh database -- an
     # existing one (like the live deployment) already has these tables
     # without device_type, so add it explicitly. SQLite has no "ADD COLUMN

@@ -6,17 +6,22 @@
 <div class="text-muted mb-2">Snapshot: <code>{{ ts }}</code> ({{ ts|age }} ago)</div>
 {% endif %}
 
+<p class="text-muted small">
+  Lifecycle controls whether a device counts toward stats (uptime %, most-troublesome,
+  total downtime) and active-incident alerting. Historical events are always kept regardless.
+</p>
+
 <div class="card">
   <div class="table-responsive">
     <table class="table table-sm table-striped mb-0">
       <thead>
         <tr>
-          <th>State</th><th>Name</th><th>Model</th><th>IP</th><th>MAC</th>
+          <th>State</th><th>Name</th><th>Model</th><th>IP</th><th>MAC</th><th>Lifecycle</th>
         </tr>
       </thead>
       <tbody>
         {% for d in devices %}
-        <tr>
+        <tr class="{% if d['lifecycle'] != 'monitored' %}text-muted{% endif %}">
           <td>
             {% if d["state"] == "OFFLINE" %}
               <span class="badge bg-danger">OFFLINE</span>
@@ -28,10 +33,20 @@
           <td class="text-muted">{{ d["model"] }}</td>
           <td><code>{{ d["ip"] }}</code></td>
           <td><code>{{ d["mac"] }}</code></td>
+          <td>
+            <form method="post" action="{{ url_for('set_device_lifecycle', device_id=d['device_id']) }}" class="d-flex align-items-center gap-2">
+              <select name="lifecycle" class="form-select form-select-sm" style="width: auto;" onchange="this.form.requestSubmit()">
+                {% for lc in lifecycles %}
+                <option value="{{ lc }}" {% if d['lifecycle'] == lc %}selected{% endif %}>{{ lc|capitalize }}</option>
+                {% endfor %}
+              </select>
+              <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Set</button></noscript>
+            </form>
+          </td>
         </tr>
         {% endfor %}
         {% if devices|length == 0 %}
-        <tr><td colspan="5" class="text-muted p-3">No devices.</td></tr>
+        <tr><td colspan="6" class="text-muted p-3">No devices.</td></tr>
         {% endif %}
       </tbody>
     </table>
