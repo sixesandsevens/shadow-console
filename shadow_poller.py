@@ -39,6 +39,31 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def classify_device_type(features: Optional[List[str]]) -> str:
+    """
+    Maps a device's UniFi "features" array to a coarse type used by the
+    browser-notification policy. Based on inspecting live data: switches
+    report features=["switching"], APs report features=["accessPoint"].
+    Note a gateway (e.g. UDM Pro Max) also reports "switching" -- the
+    Integration API gives no separate signal to distinguish it from a
+    plain switch, so it's bucketed as "switch" too (arguably correct:
+    a gateway going down is just as notify-worthy).
+
+    "camera" is speculative: UniFi Protect cameras are a separate API this
+    poller doesn't currently query, so no device in this dataset has ever
+    reported a camera-like feature. This check is a no-op today, kept only
+    so classification doesn't need touching if that data ever shows up.
+    """
+    feats = {f.lower() for f in (features or [])}
+    if "accesspoint" in feats:
+        return "ap"
+    if "camera" in feats:
+        return "camera"
+    if "switching" in feats:
+        return "switch"
+    return "other"
+
+
 def get_env(name: str, default: Optional[str] = None) -> str:
     val = os.getenv(name, default)
     if val is None or val == "":
@@ -104,6 +129,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             ip TEXT,
             state TEXT,
             mac TEXT,
+            device_type TEXT,
             raw_json TEXT NOT NULL,
             PRIMARY KEY (ts, device_id)
         );
@@ -142,6 +168,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             ip_new TEXT,
             uplink_old TEXT,
             uplink_new TEXT,
+            device_type TEXT,
             details TEXT
         );
         """
@@ -173,7 +200,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             last_model TEXT,
             last_ip TEXT,
             last_mac TEXT,
-            last_state TEXT
+            last_state TEXT,
+            last_device_type TEXT
         );
         """
     )
@@ -186,6 +214,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             mac TEXT,
             name TEXT,
             model TEXT,
+            device_type TEXT,
             opened_ts TEXT NOT NULL,
             opened_reason TEXT NOT NULL,
             closed_ts TEXT,
@@ -224,6 +253,22 @@ def init_db(db_path: str) -> sqlite3.Connection:
         );
         """
     )
+
+    # CREATE TABLE IF NOT EXISTS above only helps a fresh database -- an
+    # existing one (like the live deployment) already has these tables
+    # without device_type, so add it explicitly. SQLite has no "ADD COLUMN
+    # IF NOT EXISTS", hence the guard.
+    for table, column, coltype in (
+        ("device_snapshot", "device_type", "TEXT"),
+        ("device_state", "last_device_type", "TEXT"),
+        ("device_incidents", "device_type", "TEXT"),
+        ("events", "device_type", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     conn.commit()
     return conn
@@ -270,6 +315,7 @@ def open_device_incident(
     mac: Optional[str],
     name: Optional[str],
     model: Optional[str],
+    device_type: Optional[str],
     reason: str,
 ) -> None:
     # A device can only have one open incident at a time -- e.g. it can go
@@ -280,10 +326,10 @@ def open_device_incident(
     conn.execute(
         """
         INSERT INTO device_incidents
-        (device_id, mac, name, model, opened_ts, opened_reason)
-        VALUES (?, ?, ?, ?, ?, ?);
+        (device_id, mac, name, model, device_type, opened_ts, opened_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
         """,
-        (device_id, mac, name, model, ts, reason),
+        (device_id, mac, name, model, device_type, ts, reason),
     )
 
 
@@ -349,6 +395,7 @@ def main() -> None:
                     "ip": d.get("ipAddress"),
                     "state": d.get("state"),
                     "mac": d.get("macAddress"),
+                    "device_type": classify_device_type(d.get("features")),
                 }
                 for d in devices
                 if "id" in d
@@ -360,8 +407,8 @@ def main() -> None:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO device_snapshot
-                    (ts, site_id, device_id, name, model, ip, state, mac, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    (ts, site_id, device_id, name, model, ip, state, mac, device_type, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         ts,
@@ -372,6 +419,7 @@ def main() -> None:
                         d.get("ipAddress"),
                         d.get("state"),
                         d.get("macAddress"),
+                        classify_device_type(d.get("features")),
                         json.dumps(d, separators=(",", ":"), ensure_ascii=False),
                     ),
                 )
@@ -421,21 +469,21 @@ def main() -> None:
 
             if prev_dts is not None:
                 cur_dev_rows = conn.execute(
-                    "SELECT device_id, name, model, ip, mac, state FROM device_snapshot WHERE ts=?;",
+                    "SELECT device_id, name, model, ip, mac, state, device_type FROM device_snapshot WHERE ts=?;",
                     (newest_dts,),
                 ).fetchall()
 
                 prev_dev_rows = conn.execute(
-                    "SELECT device_id, name, model, ip, mac, state FROM device_snapshot WHERE ts=?;",
+                    "SELECT device_id, name, model, ip, mac, state, device_type FROM device_snapshot WHERE ts=?;",
                     (prev_dts,),
                 ).fetchall()
 
                 cur_devs = {
-                    r[0]: {"name": r[1], "model": r[2], "ip": r[3], "mac": r[4], "state": r[5]}
+                    r[0]: {"name": r[1], "model": r[2], "ip": r[3], "mac": r[4], "state": r[5], "device_type": r[6]}
                     for r in cur_dev_rows
                 }
                 prev_devs = {
-                    r[0]: {"name": r[1], "model": r[2], "ip": r[3], "mac": r[4], "state": r[5]}
+                    r[0]: {"name": r[1], "model": r[2], "ip": r[3], "mac": r[4], "state": r[5], "device_type": r[6]}
                     for r in prev_dev_rows
                 }
 
@@ -443,7 +491,7 @@ def main() -> None:
 
                 # Load existing device_state
                 ds_rows = conn.execute(
-                    "SELECT device_id, miss_count, last_name, last_model, last_ip, last_mac, last_state FROM device_state;"
+                    "SELECT device_id, miss_count, last_name, last_model, last_ip, last_mac, last_state, last_device_type FROM device_state;"
                 ).fetchall()
                 ds = {r[0]: r[1:] for r in ds_rows}
 
@@ -459,8 +507,8 @@ def main() -> None:
                     conn.execute(
                         """
                         INSERT INTO device_state
-                        (device_id, last_seen_ts, miss_count, last_name, last_model, last_ip, last_mac, last_state)
-                        VALUES (?, ?, 0, ?, ?, ?, ?, ?)
+                        (device_id, last_seen_ts, miss_count, last_name, last_model, last_ip, last_mac, last_state, last_device_type)
+                        VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(device_id) DO UPDATE SET
                             last_seen_ts=excluded.last_seen_ts,
                             miss_count=0,
@@ -468,9 +516,10 @@ def main() -> None:
                             last_model=excluded.last_model,
                             last_ip=excluded.last_ip,
                             last_mac=excluded.last_mac,
-                            last_state=excluded.last_state;
+                            last_state=excluded.last_state,
+                            last_device_type=excluded.last_device_type;
                         """,
-                        (did, newest_dts, d["name"], d["model"], d["ip"], d["mac"], d["state"]),
+                        (did, newest_dts, d["name"], d["model"], d["ip"], d["mac"], d["state"], d["device_type"]),
                     )
 
                     # Detect state change ONLINE <-> OFFLINE
@@ -481,24 +530,26 @@ def main() -> None:
                         if cur_state == "OFFLINE":
                             conn.execute(
                                 """INSERT INTO events
-                                   (ts, site_id, event_type, client_id, mac, details)
-                                   VALUES (?, ?, 'DEVICE_OFFLINE', NULL, ?, ?);""",
+                                   (ts, site_id, event_type, client_id, mac, device_type, details)
+                                   VALUES (?, ?, 'DEVICE_OFFLINE', NULL, ?, ?, ?);""",
                                 (
                                     newest_dts,
                                     site_id,
                                     d["mac"],
+                                    d["device_type"],
                                     f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}"',
                                 ),
                             )
                         elif cur_state == "ONLINE":
                             conn.execute(
                                 """INSERT INTO events
-                                   (ts, site_id, event_type, client_id, mac, details)
-                                   VALUES (?, ?, 'DEVICE_ONLINE', NULL, ?, ?);""",
+                                   (ts, site_id, event_type, client_id, mac, device_type, details)
+                                   VALUES (?, ?, 'DEVICE_ONLINE', NULL, ?, ?, ?);""",
                                 (
                                     newest_dts,
                                     site_id,
                                     d["mac"],
+                                    d["device_type"],
                                     f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}"',
                                 ),
                             )
@@ -512,7 +563,7 @@ def main() -> None:
                     # idempotent no-ops when there's nothing to do.
                     if cur_state == "OFFLINE":
                         open_device_incident(
-                            conn, newest_dts, did, d["mac"], d["name"], d["model"], "DEVICE_OFFLINE"
+                            conn, newest_dts, did, d["mac"], d["name"], d["model"], d["device_type"], "DEVICE_OFFLINE"
                         )
                     elif cur_state == "ONLINE":
                         # A device that vanished from the API entirely
@@ -524,12 +575,13 @@ def main() -> None:
                         if active is not None and active[2] == "DEVICE_MISSING" and did not in online_emitted:
                             conn.execute(
                                 """INSERT INTO events
-                                   (ts, site_id, event_type, client_id, mac, details)
-                                   VALUES (?, ?, 'DEVICE_ONLINE', NULL, ?, ?);""",
+                                   (ts, site_id, event_type, client_id, mac, device_type, details)
+                                   VALUES (?, ?, 'DEVICE_ONLINE', NULL, ?, ?, ?);""",
                                 (
                                     newest_dts,
                                     site_id,
                                     d["mac"],
+                                    d["device_type"],
                                     f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}" recovered_from="missing"',
                                 ),
                             )
@@ -539,7 +591,7 @@ def main() -> None:
                 # Handle devices missing from current snapshot (grace)
                 missing = set(ds.keys()) - cur_ids
                 for did in missing:
-                    miss_count, last_name, last_model, last_ip, last_mac, last_state = ds[did]
+                    miss_count, last_name, last_model, last_ip, last_mac, last_state, last_device_type = ds[did]
                     new_miss = int(miss_count) + 1
 
                     conn.execute("UPDATE device_state SET miss_count=? WHERE device_id=?;", (new_miss, did))
@@ -548,12 +600,13 @@ def main() -> None:
                         # Treat as offline/missing (even if last_state wasn't OFFLINE)
                         conn.execute(
                             """INSERT INTO events
-                               (ts, site_id, event_type, client_id, mac, details)
-                               VALUES (?, ?, 'DEVICE_MISSING', NULL, ?, ?);""",
+                               (ts, site_id, event_type, client_id, mac, device_type, details)
+                               VALUES (?, ?, 'DEVICE_MISSING', NULL, ?, ?, ?);""",
                             (
                                 newest_dts,
                                 site_id,
                                 last_mac,
+                                last_device_type,
                                 f'name="{last_name}" model="{last_model}" ip="{last_ip}" last_state="{last_state}"',
                             ),
                         )
@@ -565,7 +618,7 @@ def main() -> None:
                         # open_device_incident is a no-op if one's already
                         # active, so this doesn't re-fire on every poll.
                         open_device_incident(
-                            conn, newest_dts, did, last_mac, last_name, last_model, "DEVICE_MISSING"
+                            conn, newest_dts, did, last_mac, last_name, last_model, last_device_type, "DEVICE_MISSING"
                         )
 
                 conn.commit()

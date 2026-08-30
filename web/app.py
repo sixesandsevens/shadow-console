@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 import re
 from flask import Flask, g, render_template, request, abort
 
+try:
+    from web import notify_policy
+except ImportError:
+    import notify_policy
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.getenv("SHADOW_DB") or os.path.abspath(os.path.join(APP_DIR, "..", "shadowconsole.db"))
 
@@ -60,6 +65,15 @@ def create_app() -> Flask:
         d = h // 24
         return f"{d}d"
 
+    def human_duration(total_seconds: int) -> str:
+        m, s = divmod(total_seconds, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
     app.jinja_env.filters["age"] = human_age
 
     @app.route("/")
@@ -110,7 +124,7 @@ def create_app() -> Flask:
         # You can change this later; this is the “no noise by default” stance.
         events = q(
             """
-            SELECT rowid, ts, event_type, mac, client_id, ip_old, ip_new, uplink_old, uplink_new, details
+            SELECT rowid, ts, event_type, mac, client_id, ip_old, ip_new, uplink_old, uplink_new, device_type, details
             FROM events
             WHERE event_type IN (
                 'NEW_CLIENT','LEFT_CLIENT','MOVED_UPLINK','ROAMING_FLAP',
@@ -249,6 +263,62 @@ def create_app() -> Flask:
 
         new_count = sum(1 for e in events if e["rowid"] > since)
 
+        # Browser-notification payload: only the notify_policy-approved
+        # subset of `events` (already fetched above, same curated list the
+        # ticker renders) -- embedded as JSON for notify.js to read. This
+        # rides the page's existing 10s auto-refresh instead of a second
+        # polling loop; see notify_policy.py for the actual policy.
+        notify_events = []
+        for e in events:
+            decision = notify_policy.classify(e["event_type"], e["device_type"])
+            if not decision["notify"]:
+                continue
+
+            entry = {
+                "id": e["rowid"],
+                "event_type": e["event_type"],
+                "device_type": e["device_type"],
+                "mac": e["mac"],
+                "name": extract_name(e["details"]),
+                "ts": e["ts"],
+                "severity": decision["severity"],
+            }
+
+            if decision["severity"] == "critical":
+                active_inc = q1(
+                    "SELECT 1 FROM device_incidents WHERE mac=? AND closed_ts IS NULL LIMIT 1;",
+                    (e["mac"],),
+                )
+                entry["active"] = active_inc is not None
+            else:
+                entry["active"] = False
+                # Downtime, if we can find the incident this recovery closed.
+                # If not found cleanly, leave it out rather than guessing.
+                closed_inc = q1(
+                    """
+                    SELECT opened_ts, closed_ts FROM device_incidents
+                    WHERE mac=? AND closed_ts IS NOT NULL
+                    ORDER BY incident_id DESC LIMIT 1;
+                    """,
+                    (e["mac"],),
+                )
+                if closed_inc:
+                    try:
+                        opened_dt = parse_ts(closed_inc["opened_ts"])
+                        closed_dt = parse_ts(closed_inc["closed_ts"])
+                        downtime_sec = int((closed_dt - opened_dt).total_seconds())
+                        if downtime_sec >= 0:
+                            entry["downtime"] = human_duration(downtime_sec)
+                    except (ValueError, TypeError):
+                        pass
+
+            notify_events.append(entry)
+
+        notify_payload = {
+            "events": notify_events,
+            "poller_dead": stale_level == "dead",
+        }
+
         return render_template(
             "index.html",
             latest_ts=latest_ts,
@@ -257,6 +327,7 @@ def create_app() -> Flask:
             events=events,
             breakdown=breakdown,
             since=since,
+            notify_payload=notify_payload,
             new_count=new_count,
             latest_event_id=latest_event_id,
             poll_interval=poll_interval,

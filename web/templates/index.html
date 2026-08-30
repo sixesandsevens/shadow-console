@@ -2,6 +2,10 @@
 {% block content %}
 <meta http-equiv="refresh" content="10;url=/?since={{ latest_event_id }}">
 
+{% if notify_payload is defined %}
+<script id="notify-data" type="application/json">{{ notify_payload|tojson }}</script>
+{% endif %}
+
 {% if stale_level == "dead" %}
 <div class="alert alert-danger sticky-top mb-3" role="alert">
   <strong>DATA STALE:</strong> poller hasn’t updated in {{ snapshot_age_sec }}s.
@@ -37,6 +41,7 @@
       <div class="text-muted">No snapshots yet.</div>
     {% endif %}
   </div>
+  <div id="notify-controls" class="text-end small text-muted"></div>
 </div>
 
 <div class="row g-3 mb-4">
