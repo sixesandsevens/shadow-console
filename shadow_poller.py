@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import notify_policy
+import slack_dispatcher
+
 LEFT_CLIENT_GRACE_POLLS = 3
 DEVICE_MISSING_GRACE_POLLS = 2
 LEFT_CLIENT_STALE_SEC = 3600
@@ -344,6 +347,16 @@ def close_device_incident(conn: sqlite3.Connection, ts: str, device_id: str, rea
     )
 
 
+def format_duration(total_seconds: int) -> str:
+    m, s = divmod(max(0, total_seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def prune_old_data(conn: sqlite3.Connection) -> None:
     snapshot_cutoff = (
         datetime.now(timezone.utc) - timedelta(hours=SNAPSHOT_RETENTION_HOURS)
@@ -540,7 +553,15 @@ def main() -> None:
                                     f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}"',
                                 ),
                             )
+                            decision = notify_policy.classify("DEVICE_OFFLINE", d["device_type"])
+                            if decision["notify"]:
+                                slack_dispatcher.notify_device_event("critical", d["name"], d["device_type"])
                         elif cur_state == "ONLINE":
+                            # Grab the still-open incident's opened_ts for
+                            # downtime *before* it gets closed further down
+                            # this same loop iteration (in the incident
+                            # open/close block below).
+                            prior_incident = get_active_incident(conn, did)
                             conn.execute(
                                 """INSERT INTO events
                                    (ts, site_id, event_type, client_id, mac, device_type, details)
@@ -554,6 +575,19 @@ def main() -> None:
                                 ),
                             )
                             online_emitted.add(did)
+                            decision = notify_policy.classify("DEVICE_ONLINE", d["device_type"])
+                            if decision["notify"]:
+                                downtime = None
+                                if prior_incident is not None:
+                                    try:
+                                        opened_dt = datetime.fromisoformat(prior_incident[1])
+                                        now_dt = datetime.fromisoformat(newest_dts)
+                                        downtime = format_duration(int((now_dt - opened_dt).total_seconds()))
+                                    except (ValueError, TypeError):
+                                        pass
+                                slack_dispatcher.notify_device_event(
+                                    "recovery", d["name"], d["device_type"], downtime
+                                )
 
                     # Incident open/close tracks *current* state, not just
                     # transitions -- so a device that was already OFFLINE
@@ -586,6 +620,18 @@ def main() -> None:
                                 ),
                             )
                             online_emitted.add(did)
+                            decision = notify_policy.classify("DEVICE_ONLINE", d["device_type"])
+                            if decision["notify"]:
+                                downtime = None
+                                try:
+                                    opened_dt = datetime.fromisoformat(active[1])
+                                    now_dt = datetime.fromisoformat(newest_dts)
+                                    downtime = format_duration(int((now_dt - opened_dt).total_seconds()))
+                                except (ValueError, TypeError):
+                                    pass
+                                slack_dispatcher.notify_device_event(
+                                    "recovery", d["name"], d["device_type"], downtime
+                                )
                         close_device_incident(conn, newest_dts, did, "DEVICE_ONLINE")
 
                 # Handle devices missing from current snapshot (grace)
@@ -610,6 +656,9 @@ def main() -> None:
                                 f'name="{last_name}" model="{last_model}" ip="{last_ip}" last_state="{last_state}"',
                             ),
                         )
+                        decision = notify_policy.classify("DEVICE_MISSING", last_device_type)
+                        if decision["notify"]:
+                            slack_dispatcher.notify_device_event("critical", last_name, last_device_type)
 
                     if new_miss >= DEVICE_MISSING_GRACE_POLLS:
                         # >= (not ==) so a device that was already past the

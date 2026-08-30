@@ -1,10 +1,12 @@
 """
-Central policy for browser (and eventually Slack/email/push) notifications.
+Central policy for browser, Slack, and (eventually) other notification
+backends.
 
 This is the ONLY place that decides which device events are important
-enough to interrupt someone -- app.py just calls classify() per event and
-serializes the result; a future dispatcher for another backend can import
-and reuse the same policy instead of re-deciding it.
+enough to interrupt someone. Lives at the top level (not under web/) so
+both shadow_poller.py (which dispatches to Slack the moment it detects a
+transition) and web/app.py (which serializes it for the browser) import
+the exact same policy instead of each deciding it independently.
 """
 from typing import Optional
 

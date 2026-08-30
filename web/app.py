@@ -8,8 +8,14 @@ import re
 from flask import Flask, g, render_template, request, abort
 
 try:
-    from web import notify_policy
+    import notify_policy
 except ImportError:
+    # Direct-run mode (`python3 web/app.py`) without PYTHONPATH set won't
+    # see notify_policy.py in the parent dir otherwise -- the systemd unit
+    # always sets PYTHONPATH=/opt/shadow-console, so this only matters for
+    # ad-hoc manual runs.
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import notify_policy
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
