@@ -123,6 +123,33 @@ body {
   border-color: var(--sc-border);
 }
 
+.sc-navbar {
+  background: var(--sc-card) !important;
+  border-bottom: 1px solid var(--sc-border);
+}
+
+.sc-navbar .navbar-brand,
+.sc-navbar .nav-link {
+  color: var(--sc-text) !important;
+}
+
+.sc-navbar .nav-link:hover,
+.sc-navbar .nav-link:focus {
+  color: var(--sc-accent) !important;
+}
+
+.sc-navbar-btn {
+  color: var(--sc-text);
+  border: 1px solid var(--sc-border);
+  background: transparent;
+}
+
+.sc-navbar-btn:hover {
+  color: var(--sc-bg);
+  background: var(--sc-accent);
+  border-color: var(--sc-accent);
+}
+
 .text-muted {
   color: var(--sc-muted) !important;
 }
