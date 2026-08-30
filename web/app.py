@@ -114,7 +114,7 @@ def create_app() -> Flask:
             FROM events
             WHERE event_type IN (
                 'NEW_CLIENT','LEFT_CLIENT','MOVED_UPLINK','ROAMING_FLAP',
-                'DEVICE_OFFLINE','DEVICE_ONLINE','DEVICE_MISSING'
+                'DEVICE_OFFLINE','DEVICE_ONLINE','DEVICE_MISSING','CLIENT_CHURN_SPIKE'
             )
             ORDER BY rowid DESC
             LIMIT 50;
@@ -211,6 +211,19 @@ def create_app() -> Flask:
                     "level": "critical",
                     "text": f"{text}: {label}",
                     "age": human_age(inc["opened_ts"]),
+                }
+            )
+
+        # Client churn spike: active means the rolling LEFT_CLIENT count is
+        # still at/above threshold right now, not just that it crossed it
+        # at some point in the past.
+        churn = q1("SELECT last_count, started_ts FROM churn_spike_state WHERE active=1 LIMIT 1;")
+        if churn:
+            anomalies.append(
+                {
+                    "level": "critical",
+                    "text": f"Client churn spike: {churn['last_count']} clients left recently",
+                    "age": human_age(churn["started_ts"]),
                 }
             )
 

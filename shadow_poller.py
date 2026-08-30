@@ -14,6 +14,12 @@ LEFT_CLIENT_STALE_SEC = 3600
 ROAM_FLAP_WINDOW_SEC = 10 * 60
 ROAM_FLAP_THRESHOLD = 5
 
+# A burst of LEFT_CLIENT events close together is a different story than
+# one client leaving -- it's a sign something upstream (an AP, a switch, a
+# whole building) took a bunch of clients down with it.
+CHURN_SPIKE_WINDOW_SEC = int(os.getenv("SHADOW_CHURN_WINDOW_SEC", str(3 * 60)))
+CHURN_SPIKE_THRESHOLD = int(os.getenv("SHADOW_CHURN_THRESHOLD", "10"))
+
 # device_snapshot/client_snapshot are written on every poll regardless of
 # change and are only ever read as "latest" or "last 200 rows per client"
 # (~3h at a 60s poll interval) -- so they only need a short rolling window.
@@ -198,6 +204,17 @@ def init_db(db_path: str) -> sqlite3.Connection:
             roam_count INTEGER NOT NULL DEFAULT 0,
             last_uplink TEXT,
             last_event_ts TEXT
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS churn_spike_state (
+            site_id TEXT PRIMARY KEY,
+            active INTEGER NOT NULL DEFAULT 0,
+            started_ts TEXT,
+            last_count INTEGER
         );
         """
     )
@@ -681,6 +698,50 @@ def main() -> None:
                             ),
                         )
                         left_logged += 1
+
+                # Client churn spike: count LEFT_CLIENT events across a
+                # rolling window (not just this poll -- 18 clients leaving
+                # over 3 polls is the same story as 18 leaving in 1) and
+                # fire CLIENT_CHURN_SPIKE once when that count *crosses*
+                # the threshold, not on every poll it stays elevated.
+                churn_cutoff = (
+                    datetime.fromisoformat(ts) - timedelta(seconds=CHURN_SPIKE_WINDOW_SEC)
+                ).isoformat()
+                churn_count = conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE site_id=? AND event_type='LEFT_CLIENT' AND ts >= ?;",
+                    (site_id, churn_cutoff),
+                ).fetchone()[0]
+
+                churn_row = conn.execute(
+                    "SELECT active FROM churn_spike_state WHERE site_id=?;", (site_id,)
+                ).fetchone()
+                churn_was_active = bool(churn_row and churn_row[0])
+
+                if churn_count >= CHURN_SPIKE_THRESHOLD:
+                    if not churn_was_active:
+                        conn.execute(
+                            """INSERT INTO events
+                               (ts, site_id, event_type, details)
+                               VALUES (?, ?, 'CLIENT_CHURN_SPIKE', ?);""",
+                            (ts, site_id, f"count={churn_count} window={CHURN_SPIKE_WINDOW_SEC}s"),
+                        )
+                    conn.execute(
+                        """
+                        INSERT INTO churn_spike_state (site_id, active, started_ts, last_count)
+                        VALUES (?, 1, ?, ?)
+                        ON CONFLICT(site_id) DO UPDATE SET
+                            active=1,
+                            started_ts=CASE WHEN churn_spike_state.active=1
+                                             THEN churn_spike_state.started_ts ELSE excluded.started_ts END,
+                            last_count=excluded.last_count;
+                        """,
+                        (site_id, ts, churn_count),
+                    )
+                elif churn_was_active:
+                    conn.execute(
+                        "UPDATE churn_spike_state SET active=0, started_ts=NULL, last_count=? WHERE site_id=?;",
+                        (churn_count, site_id),
+                    )
 
                 for cid in common:
                     c = cur[cid]
