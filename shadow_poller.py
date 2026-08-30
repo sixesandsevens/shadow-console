@@ -20,6 +20,12 @@ ROAM_FLAP_THRESHOLD = 5
 CHURN_SPIKE_WINDOW_SEC = int(os.getenv("SHADOW_CHURN_WINDOW_SEC", str(3 * 60)))
 CHURN_SPIKE_THRESHOLD = int(os.getenv("SHADOW_CHURN_THRESHOLD", "10"))
 
+# A churn spike is "correlated" with an infra outage when most of the
+# departing clients shared one uplink and that device currently has an
+# open incident -- not just a coincidence of timing.
+CHURN_CORRELATION_MIN_COUNT = int(os.getenv("SHADOW_CHURN_CORRELATION_MIN_COUNT", "3"))
+CHURN_CORRELATION_MIN_SHARE = float(os.getenv("SHADOW_CHURN_CORRELATION_SHARE", "0.5"))
+
 # device_snapshot/client_snapshot are written on every poll regardless of
 # change and are only ever read as "latest" or "last 200 rows per client"
 # (~3h at a 60s poll interval) -- so they only need a short rolling window.
@@ -725,6 +731,49 @@ def main() -> None:
                                VALUES (?, ?, 'CLIENT_CHURN_SPIKE', ?);""",
                             (ts, site_id, f"count={churn_count} window={CHURN_SPIKE_WINDOW_SEC}s"),
                         )
+
+                        # Correlate: did most of these clients share the same
+                        # uplink, and is that device currently down? That's
+                        # the difference between "a bunch of clients left"
+                        # and "the AP/switch serving them just went out."
+                        top_uplink = conn.execute(
+                            """
+                            SELECT cs.last_uplink, COUNT(*) AS n
+                            FROM events e
+                            JOIN client_state cs ON cs.client_id = e.client_id
+                            WHERE e.site_id=? AND e.event_type='LEFT_CLIENT' AND e.ts >= ?
+                                  AND cs.last_uplink IS NOT NULL
+                            GROUP BY cs.last_uplink
+                            ORDER BY n DESC
+                            LIMIT 1;
+                            """,
+                            (site_id, churn_cutoff),
+                        ).fetchone()
+
+                        if top_uplink is not None:
+                            uplink_id, affected = top_uplink
+                            active_inc = get_active_incident(conn, uplink_id)
+                            if (
+                                active_inc is not None
+                                and affected >= CHURN_CORRELATION_MIN_COUNT
+                                and affected >= churn_count * CHURN_CORRELATION_MIN_SHARE
+                            ):
+                                kind = "AP" if is_ap(uplink_id) else "device"
+                                conn.execute(
+                                    """INSERT INTO events
+                                       (ts, site_id, event_type, mac, details)
+                                       VALUES (?, ?, 'INFRA_OUTAGE_LIKELY', ?, ?);""",
+                                    (
+                                        ts,
+                                        site_id,
+                                        device_map.get(uplink_id, {}).get("mac"),
+                                        (
+                                            f'{kind}="{devlabel(uplink_id)}" affected_clients={affected} '
+                                            f'of_churn={churn_count} incident_reason="{active_inc[2]}" '
+                                            f'incident_opened="{active_inc[1]}"'
+                                        ),
+                                    ),
+                                )
                     conn.execute(
                         """
                         INSERT INTO churn_spike_state (site_id, active, started_ts, last_count)

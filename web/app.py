@@ -114,7 +114,8 @@ def create_app() -> Flask:
             FROM events
             WHERE event_type IN (
                 'NEW_CLIENT','LEFT_CLIENT','MOVED_UPLINK','ROAMING_FLAP',
-                'DEVICE_OFFLINE','DEVICE_ONLINE','DEVICE_MISSING','CLIENT_CHURN_SPIKE'
+                'DEVICE_OFFLINE','DEVICE_ONLINE','DEVICE_MISSING',
+                'CLIENT_CHURN_SPIKE','INFRA_OUTAGE_LIKELY'
             )
             ORDER BY rowid DESC
             LIMIT 50;
@@ -205,11 +206,30 @@ def create_app() -> Flask:
             label = inc["mac"] or inc["device_id"]
             if inc["name"]:
                 label = f"{inc['name']} ({label})"
-            text = "Device offline" if inc["opened_reason"] == "DEVICE_OFFLINE" else "Device missing"
+
+            # If a churn spike was correlated to this device while the
+            # incident's been open, that's a stronger, more actionable
+            # signal than "device offline" alone -- surface it instead.
+            outage = q1(
+                """
+                SELECT details FROM events
+                WHERE event_type='INFRA_OUTAGE_LIKELY' AND mac=? AND ts >= ?
+                ORDER BY rowid DESC LIMIT 1;
+                """,
+                (inc["mac"], inc["opened_ts"]),
+            )
+            if outage:
+                m = re.search(r"affected_clients=(\d+)", outage["details"] or "")
+                affected = f" ({m.group(1)} clients affected)" if m else ""
+                text = f"Outage likely: {label}{affected}"
+            else:
+                kind = "Device offline" if inc["opened_reason"] == "DEVICE_OFFLINE" else "Device missing"
+                text = f"{kind}: {label}"
+
             anomalies.append(
                 {
                     "level": "critical",
-                    "text": f"{text}: {label}",
+                    "text": text,
                     "age": human_age(inc["opened_ts"]),
                 }
             )
