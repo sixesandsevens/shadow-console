@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="h4 mb-3">Settings</h1>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <h2 class="h6 text-muted text-uppercase mb-3">Appearance</h2>
+
+    <label class="form-label">Theme</label>
+    <div class="row g-2 mb-3" id="theme-picker">
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="light" style="background:#ffffff;"></button>
+        <div class="small mt-1">Light</div>
+      </div>
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="dark" style="background:#0b0f16;"></button>
+        <div class="small mt-1">Shadow</div>
+      </div>
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="terminal" style="background:#001100;"></button>
+        <div class="small mt-1">Terminal Green</div>
+      </div>
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="amber" style="background:#1a0f00;"></button>
+        <div class="small mt-1">Amber CRT</div>
+      </div>
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="midnight" style="background:#05070f;"></button>
+        <div class="small mt-1">Midnight</div>
+      </div>
+      <div class="col-4 col-md-2 text-center">
+        <button type="button" class="theme-swatch" data-theme="contrast" style="background:#000000; border-color:#fff;"></button>
+        <div class="small mt-1">High Contrast</div>
+      </div>
+    </div>
+
+    <div class="row g-3 align-items-center">
+      <div class="col-auto">
+        <label class="form-label mb-0" for="accent-input">Accent color</label>
+      </div>
+      <div class="col-auto">
+        <input type="color" id="accent-input" class="form-control form-control-color" value="#ec4899">
+      </div>
+      <div class="col-auto">
+        <button type="button" id="accent-reset" class="btn btn-sm btn-outline-secondary">Reset to theme default</button>
+      </div>
+    </div>
+
+    <div class="form-check form-switch mt-3">
+      <input class="form-check-input" type="checkbox" id="crt-toggle">
+      <label class="form-check-label" for="crt-toggle">CRT scanline effect</label>
+    </div>
+
+    <div class="form-check form-switch mt-2">
+      <input class="form-check-input" type="checkbox" id="density-toggle">
+      <label class="form-check-label" for="density-toggle">Compact table density</label>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <h2 class="h6 text-muted text-uppercase mb-3">Notifications</h2>
+    <p class="text-muted small mb-2">Desktop notification permission is per-browser and controlled from the dashboard.</p>
+    <div id="notify-controls-settings" class="small"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 text-muted text-uppercase mb-2">System</h2>
+    <p class="text-muted small mb-0">Alert policies, detection thresholds, and per-device settings will live here once they move server-side.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var THEME_DEFAULT_ACCENT = {
+    light: "#ec4899", dark: "#ec4899", terminal: "#33ff33",
+    amber: "#ffb000", midnight: "#3b82f6", contrast: "#ffff00"
+  };
+
+  function currentTheme() {
+    return root.getAttribute("data-theme") || "light";
+  }
+
+  function markSelectedSwatch() {
+    var t = currentTheme();
+    document.querySelectorAll(".theme-swatch").forEach(function (btn) {
+      btn.classList.toggle("selected", btn.dataset.theme === t);
+    });
+  }
+
+  document.querySelectorAll(".theme-swatch").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var theme = btn.dataset.theme;
+      root.setAttribute("data-theme", theme);
+      localStorage.setItem("shadow-theme", theme);
+      if (!localStorage.getItem("shadow-accent")) {
+        accentInput.value = THEME_DEFAULT_ACCENT[theme] || "#ec4899";
+      }
+      markSelectedSwatch();
+    });
+  });
+
+  var accentInput = document.getElementById("accent-input");
+  var savedAccent = localStorage.getItem("shadow-accent");
+  accentInput.value = savedAccent || THEME_DEFAULT_ACCENT[currentTheme()] || "#ec4899";
+  accentInput.addEventListener("input", function () {
+    root.style.setProperty("--sc-accent", accentInput.value);
+    localStorage.setItem("shadow-accent", accentInput.value);
+  });
+
+  document.getElementById("accent-reset").addEventListener("click", function () {
+    localStorage.removeItem("shadow-accent");
+    root.style.removeProperty("--sc-accent");
+    accentInput.value = THEME_DEFAULT_ACCENT[currentTheme()] || "#ec4899";
+  });
+
+  var crtToggle = document.getElementById("crt-toggle");
+  crtToggle.checked = localStorage.getItem("shadow-crt") === "on";
+  crtToggle.addEventListener("change", function () {
+    root.classList.toggle("crt-on", crtToggle.checked);
+    localStorage.setItem("shadow-crt", crtToggle.checked ? "on" : "off");
+  });
+
+  var densityToggle = document.getElementById("density-toggle");
+  densityToggle.checked = localStorage.getItem("shadow-density") === "compact";
+  densityToggle.addEventListener("change", function () {
+    root.classList.toggle("density-compact", densityToggle.checked);
+    localStorage.setItem("shadow-density", densityToggle.checked ? "compact" : "comfortable");
+  });
+
+  markSelectedSwatch();
+
+  // Reuse notify.js's permission UI here too, without duplicating its logic:
+  // it looks up #notify-controls by id, so give it a second target only when
+  // notify.js isn't already running on this page (it early-returns without
+  // #notify-data, which this page doesn't have).
+  if (typeof Notification !== "undefined") {
+    var el = document.getElementById("notify-controls-settings");
+    function render() {
+      var state = Notification.permission;
+      if (state === "granted") {
+        el.textContent = "Desktop Notifications: Enabled";
+      } else if (state === "denied") {
+        el.textContent = "Desktop Notifications: Blocked (change this in your browser's site settings)";
+      } else {
+        el.innerHTML = "";
+        var span = document.createElement("span");
+        span.textContent = "Desktop Notifications: Disabled ";
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-sm btn-outline-secondary";
+        btn.textContent = "Enable Desktop Notifications";
+        btn.addEventListener("click", function () {
+          Notification.requestPermission().then(render);
+        });
+        el.appendChild(span);
+        el.appendChild(btn);
+      }
+    }
+    render();
+  } else {
+    document.getElementById("notify-controls-settings").textContent = "Desktop Notifications: Unsupported";
+  }
+})();
+</script>
+{% endblock %}

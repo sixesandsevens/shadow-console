@@ -505,6 +505,10 @@ def create_app() -> Flask:
         )
         return render_template("devices.html", ts=ts, devices=rows)
 
+    @app.route("/settings")
+    def settings():
+        return render_template("settings.html")
+
     @app.route("/stats")
     def stats():
         window, start, now = window_bounds(request.args.get("window", "7d"))
