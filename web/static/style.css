@@ -218,7 +218,21 @@ code { font-size: 0.9em; }
 .theme-swatch.selected {
   border-color: var(--sc-accent);
 }
+/* Bootstrap's .table-warning hardcodes a literal cream bg + black text with
+   no dark-mode variant (unlike most Bootstrap components, it never reads
+   --bs-warning-* at all) -- so it stays cream-on-black regardless of theme
+   unless we override its --bs-table-* variables ourselves, the same way
+   Bootstrap's own striped/hover variants do. */
 .table-warning {
+  --bs-table-bg: color-mix(in srgb, var(--sc-accent) 22%, var(--sc-table-bg, var(--sc-card)));
+  --bs-table-color: var(--sc-text);
+  --bs-table-striped-bg: color-mix(in srgb, var(--sc-accent) 30%, var(--sc-table-bg, var(--sc-card)));
+  --bs-table-striped-color: var(--sc-text);
+  --bs-table-hover-bg: color-mix(in srgb, var(--sc-accent) 38%, var(--sc-table-bg, var(--sc-card)));
+  --bs-table-hover-color: var(--sc-text);
+  --bs-table-border-color: var(--sc-table-border, var(--sc-border));
+  color: var(--sc-text);
+  border-color: var(--sc-table-border, var(--sc-border));
   animation: pulse-warning 1.2s ease-in-out 2;
 }
 
