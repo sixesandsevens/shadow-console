@@ -168,6 +168,30 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS device_incidents (
+            incident_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            mac TEXT,
+            name TEXT,
+            model TEXT,
+            opened_ts TEXT NOT NULL,
+            opened_reason TEXT NOT NULL,
+            closed_ts TEXT,
+            closed_reason TEXT
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_device_incidents_active
+        ON device_incidents(device_id)
+        WHERE closed_ts IS NULL;
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS wifi_roam_state (
             client_id TEXT PRIMARY KEY,
             window_start_ts TEXT,
@@ -202,6 +226,53 @@ def get_last_two_device_timestamps(conn: sqlite3.Connection) -> Tuple[Optional[s
     if len(rows) == 1:
         return rows[0][0], None
     return rows[0][0], rows[1][0]
+
+
+def get_active_incident(conn: sqlite3.Connection, device_id: str) -> Optional[Tuple[int, str, str]]:
+    return conn.execute(
+        """
+        SELECT incident_id, opened_ts, opened_reason
+        FROM device_incidents
+        WHERE device_id=? AND closed_ts IS NULL
+        ORDER BY incident_id DESC LIMIT 1;
+        """,
+        (device_id,),
+    ).fetchone()
+
+
+def open_device_incident(
+    conn: sqlite3.Connection,
+    ts: str,
+    device_id: str,
+    mac: Optional[str],
+    name: Optional[str],
+    model: Optional[str],
+    reason: str,
+) -> None:
+    # A device can only have one open incident at a time -- e.g. it can go
+    # OFFLINE (still adopted) and later vanish from the API entirely without
+    # ever recovering; that's still the same outage.
+    if get_active_incident(conn, device_id) is not None:
+        return
+    conn.execute(
+        """
+        INSERT INTO device_incidents
+        (device_id, mac, name, model, opened_ts, opened_reason)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (device_id, mac, name, model, ts, reason),
+    )
+
+
+def close_device_incident(conn: sqlite3.Connection, ts: str, device_id: str, reason: str) -> None:
+    conn.execute(
+        """
+        UPDATE device_incidents
+        SET closed_ts=?, closed_reason=?
+        WHERE device_id=? AND closed_ts IS NULL;
+        """,
+        (ts, reason, device_id),
+    )
 
 
 def prune_old_data(conn: sqlite3.Connection) -> None:
@@ -355,6 +426,11 @@ def main() -> None:
 
                 conn.execute("BEGIN;")
 
+                # Tracks devices we've already emitted a DEVICE_ONLINE for
+                # this poll, so a device recovering from DEVICE_MISSING
+                # doesn't get a second recovery event fired for it below.
+                online_emitted = set()
+
                 # Update state for devices we see now
                 for did, d in cur_devs.items():
                     conn.execute(
@@ -403,6 +479,39 @@ def main() -> None:
                                     f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}"',
                                 ),
                             )
+                            online_emitted.add(did)
+
+                    # Incident open/close tracks *current* state, not just
+                    # transitions -- so a device that was already OFFLINE
+                    # before this feature (or the poller) started still gets
+                    # an incident, instead of staying invisible until it
+                    # next flaps. open_/close_device_incident are both
+                    # idempotent no-ops when there's nothing to do.
+                    if cur_state == "OFFLINE":
+                        open_device_incident(
+                            conn, newest_dts, did, d["mac"], d["name"], d["model"], "DEVICE_OFFLINE"
+                        )
+                    elif cur_state == "ONLINE":
+                        # A device that vanished from the API entirely
+                        # (DEVICE_MISSING) has no "state" field to compare
+                        # against, so the transition check above never sees
+                        # it -- reappearing here, still ONLINE, is the only
+                        # signal we get that it recovered.
+                        active = get_active_incident(conn, did)
+                        if active is not None and active[2] == "DEVICE_MISSING" and did not in online_emitted:
+                            conn.execute(
+                                """INSERT INTO events
+                                   (ts, site_id, event_type, client_id, mac, details)
+                                   VALUES (?, ?, 'DEVICE_ONLINE', NULL, ?, ?);""",
+                                (
+                                    newest_dts,
+                                    site_id,
+                                    d["mac"],
+                                    f'name="{d["name"]}" model="{d["model"]}" ip="{d["ip"]}" recovered_from="missing"',
+                                ),
+                            )
+                            online_emitted.add(did)
+                        close_device_incident(conn, newest_dts, did, "DEVICE_ONLINE")
 
                 # Handle devices missing from current snapshot (grace)
                 missing = set(ds.keys()) - cur_ids
@@ -424,6 +533,16 @@ def main() -> None:
                                 last_mac,
                                 f'name="{last_name}" model="{last_model}" ip="{last_ip}" last_state="{last_state}"',
                             ),
+                        )
+
+                    if new_miss >= DEVICE_MISSING_GRACE_POLLS:
+                        # >= (not ==) so a device that was already past the
+                        # grace threshold before this feature (or the
+                        # poller) started still gets an incident opened --
+                        # open_device_incident is a no-op if one's already
+                        # active, so this doesn't re-fire on every poll.
+                        open_device_incident(
+                            conn, newest_dts, did, last_mac, last_name, last_model, "DEVICE_MISSING"
                         )
 
                 conn.commit()

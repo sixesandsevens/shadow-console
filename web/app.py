@@ -189,31 +189,28 @@ def create_app() -> Flask:
                 }
             )
 
-        # Device offline/missing incidents (last 10 minutes)
-        dev_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        dev_rows = q(
+        # Active device incidents: opened when a device goes DEVICE_OFFLINE
+        # or DEVICE_MISSING, closed the moment it comes back (DEVICE_ONLINE).
+        # Unlike a fixed time window, this disappears exactly when the
+        # device recovers instead of lingering for N more minutes.
+        active_incidents = q(
             """
-            SELECT ts, mac, event_type, details
-            FROM events
-            WHERE event_type IN ('DEVICE_OFFLINE','DEVICE_MISSING')
-            ORDER BY rowid DESC
-            LIMIT 20;
+            SELECT device_id, mac, name, model, opened_ts, opened_reason
+            FROM device_incidents
+            WHERE closed_ts IS NULL
+            ORDER BY opened_ts ASC;
             """
         )
-        for d in dev_rows:
-            dts = parse_iso(d["ts"])
-            if dts < dev_cutoff:
-                continue
-            label = d["mac"]
-            name = extract_name(d["details"])
-            if name:
-                label = f"{name} ({label})"
-            text = "Device offline" if d["event_type"] == "DEVICE_OFFLINE" else "Device missing"
+        for inc in active_incidents:
+            label = inc["mac"] or inc["device_id"]
+            if inc["name"]:
+                label = f"{inc['name']} ({label})"
+            text = "Device offline" if inc["opened_reason"] == "DEVICE_OFFLINE" else "Device missing"
             anomalies.append(
                 {
                     "level": "critical",
                     "text": f"{text}: {label}",
-                    "age": human_age(d["ts"]),
+                    "age": human_age(inc["opened_ts"]),
                 }
             )
 
