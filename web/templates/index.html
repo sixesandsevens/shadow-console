@@ -112,13 +112,6 @@
   </div>
 </div>
 
-{% set new_count = 0 %}
-{% for e in events %}
-  {% if e['rowid'] > since %}
-    {% set new_count = new_count + 1 %}
-  {% endif %}
-{% endfor %}
-
 <div class="mb-2">
   {% if new_count > 0 %}
     <span class="badge bg-warning text-dark">New since last refresh: {{ new_count }}</span>

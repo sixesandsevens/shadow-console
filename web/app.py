@@ -214,6 +214,8 @@ def create_app() -> Flask:
                 }
             )
 
+        new_count = sum(1 for e in events if e["rowid"] > since)
+
         return render_template(
             "index.html",
             latest_ts=latest_ts,
@@ -222,6 +224,7 @@ def create_app() -> Flask:
             events=events,
             breakdown=breakdown,
             since=since,
+            new_count=new_count,
             latest_event_id=latest_event_id,
             poll_interval=poll_interval,
             snapshot_age_sec=snapshot_age_sec,
