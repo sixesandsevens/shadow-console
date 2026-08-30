@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sqlite3
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -79,6 +80,28 @@ def create_app() -> Flask:
         if m:
             return f"{m}m {s}s"
         return f"{s}s"
+
+    def extract_building(name: Optional[str]) -> Optional[str]:
+        # No structured building field exists anywhere in the UniFi API --
+        # this is the same "Building N" naming convention already visible
+        # in device names (e.g. "GRC-GAIN-SW22 - Building 4"), just parsed
+        # instead of hardcoded. Devices without it (gateways, a few APs)
+        # come back None and get grouped as "Unknown" at render time.
+        if not name:
+            return None
+        m = re.search(r"Building\s+(\d+)", name, re.IGNORECASE)
+        return f"Building {m.group(1)}" if m else None
+
+    def window_bounds(window: str):
+        now = datetime.now(timezone.utc)
+        if window == "24h":
+            start = now - timedelta(hours=24)
+        elif window == "30d":
+            start = now - timedelta(days=30)
+        else:
+            window = "7d"
+            start = now - timedelta(days=7)
+        return window, start, now
 
     app.jinja_env.filters["age"] = human_age
 
@@ -481,6 +504,209 @@ def create_app() -> Flask:
             (ts,),
         )
         return render_template("devices.html", ts=ts, devices=rows)
+
+    @app.route("/stats")
+    def stats():
+        window, start, now = window_bounds(request.args.get("window", "7d"))
+        window_seconds = (now - start).total_seconds()
+
+        # device_incidents is never pruned (see shadow_poller.py), so any
+        # window here -- even 30d -- is a plain query against it, not a
+        # rollup. Only client_snapshot-derived numbers (client trend,
+        # poller uptime) need daily_network_stats, since that source table
+        # is pruned after 24h.
+        incident_rows = q(
+            """
+            SELECT device_id, mac, name, model, device_type, opened_ts, closed_ts
+            FROM device_incidents
+            WHERE opened_ts <= ?
+              AND (closed_ts IS NULL OR closed_ts >= ?)
+            ORDER BY opened_ts ASC;
+            """,
+            (now.isoformat(), start.isoformat()),
+        )
+
+        device_agg: Dict[str, Dict[str, Any]] = {}
+        building_agg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"incidents": 0, "downtime_seconds": 0.0})
+        total_downtime_seconds = 0.0
+
+        for r in incident_rows:
+            opened_dt = parse_ts(r["opened_ts"])
+            closed_dt = parse_ts(r["closed_ts"]) if r["closed_ts"] else now
+            overlap_start = max(opened_dt, start)
+            overlap_end = min(closed_dt, now)
+            overlap_seconds = max(0.0, (overlap_end - overlap_start).total_seconds())
+            total_downtime_seconds += overlap_seconds
+
+            agg = device_agg.setdefault(
+                r["device_id"],
+                {
+                    "name": r["name"],
+                    "device_type": r["device_type"],
+                    "incidents": 0,
+                    "downtime_seconds": 0.0,
+                    "recovery_durations": [],
+                },
+            )
+            agg["incidents"] += 1
+            agg["downtime_seconds"] += overlap_seconds
+            if r["closed_ts"]:
+                agg["recovery_durations"].append((parse_ts(r["closed_ts"]) - opened_dt).total_seconds())
+
+            building = extract_building(r["name"]) or "Unknown"
+            building_agg[building]["incidents"] += 1
+            building_agg[building]["downtime_seconds"] += overlap_seconds
+
+        # Device universe = currently-known devices (latest snapshot), so a
+        # clean device shows up as 100% uptime / 0 incidents instead of
+        # being omitted entirely.
+        latest_dev_ts = q1("SELECT MAX(ts) AS ts FROM device_snapshot;")
+        known_devices = (
+            q(
+                "SELECT device_id, name, device_type FROM device_snapshot WHERE ts=?;",
+                (latest_dev_ts["ts"],),
+            )
+            if latest_dev_ts and latest_dev_ts["ts"]
+            else []
+        )
+        known_ids = {d["device_id"] for d in known_devices}
+
+        def build_entry(device_id: str, name: Optional[str], device_type: Optional[str]) -> Dict[str, Any]:
+            agg = device_agg.get(device_id)
+            incidents = agg["incidents"] if agg else 0
+            downtime_seconds = agg["downtime_seconds"] if agg else 0.0
+            recovery_durations = agg["recovery_durations"] if agg else []
+            uptime_pct = (max(0.0, 1 - downtime_seconds / window_seconds) * 100) if window_seconds > 0 else 100.0
+            mean_recovery = sum(recovery_durations) / len(recovery_durations) if recovery_durations else None
+            mtbf_days = (window_seconds / incidents / 86400) if incidents > 0 else None
+            return {
+                "device_id": device_id,
+                "name": name or device_id,
+                "device_type": device_type,
+                "building": extract_building(name),
+                "incidents": incidents,
+                "downtime": human_duration(int(downtime_seconds)),
+                "downtime_seconds": downtime_seconds,
+                "uptime_pct": round(uptime_pct, 2),
+                "mean_recovery": human_duration(int(mean_recovery)) if mean_recovery is not None else None,
+                "mtbf_days": round(mtbf_days, 1) if mtbf_days is not None else None,
+            }
+
+        leaderboard = [build_entry(d["device_id"], d["name"], d["device_type"]) for d in known_devices]
+        # Devices with incidents in-window that have since dropped out of
+        # the latest snapshot (renamed/decommissioned) -- still worth
+        # showing, just not claimed as "currently known."
+        for device_id, agg in device_agg.items():
+            if device_id not in known_ids:
+                leaderboard.append(build_entry(device_id, agg["name"], agg["device_type"]))
+
+        most_troublesome = sorted(
+            [e for e in leaderboard if e["incidents"] > 0],
+            key=lambda e: (-e["incidents"], -e["downtime_seconds"]),
+        )[:5]
+        most_reliable = sorted(
+            [e for e in leaderboard if (e["device_type"] or "") in ("switch", "ap", "camera")],
+            key=lambda e: (-e["uptime_pct"], e["incidents"]),
+        )[:5]
+
+        buildings = sorted(
+            (
+                {"building": b, "incidents": v["incidents"], "downtime": human_duration(int(v["downtime_seconds"]))}
+                for b, v in building_agg.items()
+            ),
+            key=lambda x: x["incidents"],
+            reverse=True,
+        )
+        max_building_incidents = max((b["incidents"] for b in buildings), default=1)
+
+        uplink_rows = q(
+            """
+            SELECT uplink_new, COUNT(*) AS c
+            FROM events
+            WHERE event_type='MOVED_UPLINK' AND uplink_new IS NOT NULL AND ts >= ?
+            GROUP BY uplink_new
+            ORDER BY c DESC
+            LIMIT 15;
+            """,
+            (start.isoformat(),),
+        )
+        max_uplink_flaps = max((r["c"] for r in uplink_rows), default=1)
+
+        churn_spike_count = q1(
+            "SELECT COUNT(*) AS c FROM events WHERE event_type='CLIENT_CHURN_SPIKE' AND ts >= ?;",
+            (start.isoformat(),),
+        )["c"]
+
+        new_clients_rows = q(
+            """
+            SELECT substr(ts,1,10) AS day, COUNT(*) AS c
+            FROM events
+            WHERE event_type='NEW_CLIENT' AND ts >= ?
+            GROUP BY day
+            ORDER BY day ASC;
+            """,
+            (start.isoformat(),),
+        )
+
+        # Client trend: completed days from the rollup (see
+        # shadow_poller.compute_daily_rollup) plus today, computed live
+        # the same way the dashboard already does -- today doesn't have a
+        # rollup row yet since that only materializes at day-end.
+        daily_rows = q(
+            "SELECT date, peak_clients, avg_clients FROM daily_network_stats WHERE date >= ? ORDER BY date ASC;",
+            (start.date().isoformat(),),
+        )
+        trend = [{"date": r["date"], "peak": r["peak_clients"], "avg": round(r["avg_clients"], 1)} for r in daily_rows]
+
+        today_str = now.date().isoformat()
+        today_rows = q(
+            "SELECT ts, COUNT(*) AS c FROM client_snapshot WHERE ts >= ? GROUP BY ts;",
+            (f"{today_str}T00:00:00",),
+        )
+        if today_rows:
+            today_counts = [r["c"] for r in today_rows]
+            trend.append(
+                {"date": today_str, "peak": max(today_counts), "avg": round(sum(today_counts) / len(today_counts), 1)}
+            )
+        max_trend_peak = max((t["peak"] for t in trend), default=1)
+
+        # Poller downtime only reflects completed days (rollup-sourced) --
+        # today's partial downtime isn't included, same caveat as the
+        # trend chart above.
+        poller_downtime_row = q1(
+            "SELECT SUM(poller_downtime_seconds) AS s FROM daily_network_stats WHERE date >= ?;",
+            (start.date().isoformat(),),
+        )
+        poller_downtime_seconds = poller_downtime_row["s"] or 0 if poller_downtime_row else 0
+
+        latest_client_ts = q1("SELECT MAX(ts) AS ts FROM client_snapshot;")
+        composition = (
+            q(
+                "SELECT UPPER(COALESCE(type,'UNKNOWN')) AS type, COUNT(*) AS c FROM client_snapshot WHERE ts=? GROUP BY type;",
+                (latest_client_ts["ts"],),
+            )
+            if latest_client_ts and latest_client_ts["ts"]
+            else []
+        )
+
+        return render_template(
+            "stats.html",
+            window=window,
+            total_incidents=len(incident_rows),
+            total_downtime=human_duration(int(total_downtime_seconds)),
+            most_troublesome=most_troublesome,
+            most_reliable=most_reliable,
+            buildings=buildings,
+            max_building_incidents=max_building_incidents,
+            uplink_rows=uplink_rows,
+            max_uplink_flaps=max_uplink_flaps,
+            churn_spike_count=churn_spike_count,
+            new_clients_rows=new_clients_rows,
+            trend=trend,
+            max_trend_peak=max_trend_peak,
+            poller_downtime=human_duration(int(poller_downtime_seconds)),
+            composition=composition,
+        )
 
     return app
 

@@ -257,6 +257,22 @@ def init_db(db_path: str) -> sqlite3.Connection:
         """
     )
 
+    # Only client_snapshot-derived numbers need a daily rollup -- that
+    # table is pruned after SNAPSHOT_RETENTION_HOURS (24h), unlike events
+    # (90 days) or device_incidents (never pruned), so peak/avg client
+    # counts and poller uptime would otherwise be unrecoverable after a
+    # day passes. See compute_daily_rollup().
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_network_stats (
+            date TEXT PRIMARY KEY,
+            peak_clients INTEGER,
+            avg_clients REAL,
+            poller_downtime_seconds INTEGER
+        );
+        """
+    )
+
     # CREATE TABLE IF NOT EXISTS above only helps a fresh database -- an
     # existing one (like the live deployment) already has these tables
     # without device_type, so add it explicitly. SQLite has no "ADD COLUMN
@@ -376,6 +392,62 @@ def prune_old_data(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA incremental_vacuum;")
 
 
+def compute_daily_rollup(conn: sqlite3.Connection, poll_interval: int) -> None:
+    """
+    Materializes yesterday's (UTC) client_snapshot data into
+    daily_network_stats before it ages out of SNAPSHOT_RETENTION_HOURS.
+    Idempotent -- skips if that date already has a row. Must run before
+    prune_old_data() in the same cycle, or the data it needs may already
+    be gone.
+    """
+    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    date_str = yesterday.isoformat()
+
+    existing = conn.execute(
+        "SELECT 1 FROM daily_network_stats WHERE date=?;", (date_str,)
+    ).fetchone()
+    if existing is not None:
+        return
+
+    day_start = f"{date_str}T00:00:00"
+    day_end = f"{date_str}T23:59:59"
+
+    rows = conn.execute(
+        "SELECT ts, COUNT(*) AS c FROM client_snapshot WHERE ts >= ? AND ts <= ? GROUP BY ts ORDER BY ts;",
+        (day_start, day_end),
+    ).fetchall()
+
+    if not rows:
+        # No data for that day at all (poller was down the whole day, or
+        # this is a fresh deployment) -- nothing to roll up yet.
+        return
+
+    counts = [r[1] for r in rows]
+    peak_clients = max(counts)
+    avg_clients = sum(counts) / len(counts)
+
+    # Poller downtime: sum of gaps between consecutive poll timestamps
+    # that exceed 2x the expected interval. Approximate -- there's no
+    # dedicated heartbeat log, this just treats unusually large gaps
+    # between successful polls as downtime.
+    poller_downtime_seconds = 0
+    timestamps = [datetime.fromisoformat(r[0]) for r in rows]
+    for prev_ts, cur_ts in zip(timestamps, timestamps[1:]):
+        gap = (cur_ts - prev_ts).total_seconds()
+        if gap > poll_interval * 2:
+            poller_downtime_seconds += int(gap - poll_interval)
+
+    conn.execute(
+        """
+        INSERT INTO daily_network_stats (date, peak_clients, avg_clients, poller_downtime_seconds)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(date) DO NOTHING;
+        """,
+        (date_str, peak_clients, avg_clients, poller_downtime_seconds),
+    )
+    conn.commit()
+
+
 def main() -> None:
     # Read config
     base_url = get_env("SHADOW_UDM_URL")          # e.g. https://192.168.1.1
@@ -391,6 +463,7 @@ def main() -> None:
 
     conn = init_db(db_path)
 
+    compute_daily_rollup(conn, interval)
     prune_old_data(conn)
     last_prune = time.monotonic()
 
@@ -1018,6 +1091,12 @@ def main() -> None:
             print(f"[{ts}] ERROR: {type(e).__name__}: {e}")
 
         if time.monotonic() - last_prune >= PRUNE_INTERVAL_SEC:
+            try:
+                # Must run before prune_old_data -- it reads client_snapshot
+                # rows that prune is about to delete.
+                compute_daily_rollup(conn, interval)
+            except Exception as e:
+                print(f"[{ts}] ROLLUP ERROR: {type(e).__name__}: {e}")
             try:
                 prune_old_data(conn)
             except Exception as e:

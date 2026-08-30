@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h4 mb-0">Statistics</h1>
+  <div class="btn-group btn-group-sm" role="group">
+    <a href="/stats?window=24h" class="btn btn-outline-secondary {% if window == '24h' %}active{% endif %}">24h</a>
+    <a href="/stats?window=7d" class="btn btn-outline-secondary {% if window == '7d' %}active{% endif %}">7d</a>
+    <a href="/stats?window=30d" class="btn btn-outline-secondary {% if window == '30d' %}active{% endif %}">30d</a>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Device incidents</div>
+        <div class="display-6">{{ total_incidents }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Total downtime</div>
+        <div class="display-6">{{ total_downtime }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Churn spikes</div>
+        <div class="display-6">{{ churn_spike_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">Poller downtime</div>
+        <div class="display-6">{{ poller_downtime }}</div>
+        <div class="small text-muted">completed days only</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Most troublesome</h2>
+        {% if most_troublesome %}
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Device</th><th>Incidents</th><th>Downtime</th></tr></thead>
+          <tbody>
+            {% for d in most_troublesome %}
+            <tr>
+              <td>{{ d.name }}<div class="small text-muted">{{ d.building or "" }}</div></td>
+              <td>{{ d.incidents }}</td>
+              <td>{{ d.downtime }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-muted">No incidents in this window.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Most reliable</h2>
+        {% if most_reliable %}
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Device</th><th>Uptime</th><th>Incidents</th></tr></thead>
+          <tbody>
+            {% for d in most_reliable %}
+            <tr>
+              <td>{{ d.name }}<div class="small text-muted">{{ d.building or "" }}</div></td>
+              <td>{{ d.uptime_pct }}%</td>
+              <td>{{ d.incidents }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-muted">No devices known yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Incidents by building</h2>
+        {% if buildings %}
+        {% for b in buildings %}
+        <div class="stat-bar-row">
+          <span class="stat-bar-label">{{ b.building }}</span>
+          <div class="stat-bar-track">
+            <div class="stat-bar-fill" style="width: {{ (b.incidents / max_building_incidents * 100)|round(1) }}%"></div>
+          </div>
+          <span class="stat-bar-value">{{ b.incidents }} ({{ b.downtime }})</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="text-muted">No incidents in this window.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Uplink flap counts (wired uplink changes)</h2>
+        {% if uplink_rows %}
+        {% for u in uplink_rows %}
+        <div class="stat-bar-row">
+          <span class="stat-bar-label">{{ u["uplink_new"] }}</span>
+          <div class="stat-bar-track">
+            <div class="stat-bar-fill stat-bar-fill-warning" style="width: {{ (u['c'] / max_uplink_flaps * 100)|round(1) }}%"></div>
+          </div>
+          <span class="stat-bar-value">{{ u["c"] }}</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="text-muted">No uplink changes in this window.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-8">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Client count trend (peak per day)</h2>
+        {% if trend %}
+        {% for t in trend %}
+        <div class="stat-bar-row">
+          <span class="stat-bar-label">{{ t.date }}</span>
+          <div class="stat-bar-track">
+            <div class="stat-bar-fill stat-bar-fill-info" style="width: {{ (t.peak / max_trend_peak * 100)|round(1) }}%"></div>
+          </div>
+          <span class="stat-bar-value">peak {{ t.peak }} / avg {{ t.avg }}</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="text-muted">No completed days in this window yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h6 text-muted mb-3">Client composition (current)</h2>
+        {% if composition %}
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          {% for c in composition %}
+            <span class="badge bg-secondary">{{ c["type"] }}: {{ c["c"] }}</span>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-muted">No snapshot yet.</div>
+        {% endif %}
+        <h2 class="h6 text-muted mb-2 mt-3">New clients per day</h2>
+        {% if new_clients_rows %}
+        <table class="table table-sm mb-0">
+          <tbody>
+            {% for r in new_clients_rows %}
+            <tr><td>{{ r["day"] }}</td><td>{{ r["c"] }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-muted">None in this window.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
